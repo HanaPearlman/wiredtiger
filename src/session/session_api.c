@@ -1495,6 +1495,159 @@ err:
 }
 
 /*
+ * __session_range_cursor_table --
+ *     Session handling of the range stat method with table cursors.
+ */
+static int
+__session_range_cursor_table(WT_CURSOR_TABLE *start, WT_CURSOR_TABLE *stop, double *selectivityp)
+{
+    WT_DECL_RET;
+    double selectivity;
+    u_int i;
+
+    /* TODO Hana. Set the number of rows from one column group -- which? Does it matter? What are
+     * these different cursors? When does mongod create column groups? */
+    selectivity = 0; /* [-Wconditional-uninitialized] */
+    for (i = 0; i < WT_COLGROUPS(start->table); i++) {
+        selectivity = 0;
+        WT_ERR(
+          __wt_btcur_range_selectivity(start->cg_cursors[i], stop->cg_cursors[i], &selectivity));
+        fprintf(stderr, "    i: %u selectivity %lf\n", i, selectivity);
+    }
+    *selectivityp = selectivity;
+
+err:
+    return (ret);
+}
+
+/*
+ * __session_range_cursor --
+ *     Session handling of the range ce method with cursors.
+ */
+static int
+__session_range_cursor(
+  WT_SESSION_IMPL *session, WT_CURSOR *start, WT_CURSOR *stop, double *selectivity)
+{
+    WT_DECL_RET;
+    int cmp;
+    bool local_start, local_stop;
+
+    local_start = local_stop = false;
+
+    /*
+     * If both cursors set, check they're correctly ordered with respect to each other. We have to
+     * test this before any search, the search can change the initial cursor position.
+     *
+     * Rather happily, the compare routine will also confirm the cursors reference the same object
+     * and the keys are set.
+     *
+     * The test for a NULL start comparison function isn't necessary (we checked it above), but it
+     * quiets clang static analysis complaints.
+     */
+    if (start != NULL && stop != NULL && start->compare != NULL) {
+        WT_ERR(start->compare(start, stop, &cmp));
+        if (cmp > 0)
+            WT_ERR_MSG(
+              session, EINVAL, "the start cursor position is after the stop cursor position");
+    }
+
+    /*
+     * Statistics do not require keys actually exist so that applications can query parts of the
+     * object's name space without knowing exactly what records currently appear in the object. For
+     * this reason, do a search-near, rather than a search. Additionally, we have to correct after
+     * calling search-near, to position the start/stop cursors on the next record greater than/less
+     * than the original key. If we fail to find a key in a search-near, there are no keys in the
+     * table. If we fail to move forward or backward in a range, there are no keys in the range. In
+     * either of those cases, we're done.
+     */
+    if (start != NULL)
+        if ((ret = start->search_near(start, &cmp)) != 0 ||
+          (cmp < 0 && (ret = start->next(start)) != 0)) {
+            WT_ERR_NOTFOUND_OK(ret, false);
+            goto done;
+        }
+    if (stop != NULL)
+        if ((ret = stop->search_near(stop, &cmp)) != 0 ||
+          (cmp > 0 && (ret = stop->prev(stop)) != 0)) {
+            WT_ERR_NOTFOUND_OK(ret, false);
+            goto done;
+        }
+
+    /* If we don't have a start cursor, create one and position it at the first record. */
+    if (start == NULL) {
+        WT_ERR(__session_open_cursor((WT_SESSION *)session, stop->uri, NULL, NULL, &start));
+        local_start = true;
+        WT_ERR(start->next(start));
+    }
+    /* If we don't have a stop cursor, create one and position it at the last record. */
+    if (stop == NULL) {
+        WT_ERR(__session_open_cursor((WT_SESSION *)session, start->uri, NULL, NULL, &stop));
+        local_stop = true;
+        WT_ERR(start->next(stop));
+    }
+
+    /* If the start/stop keys are equal or cross, we're done, the range must be empty. */
+    WT_ERR(start->compare(start, stop, &cmp));
+    if (cmp >= 0)
+        goto done;
+
+    if (WT_PREFIX_MATCH(start->internal_uri, "file:")) {
+        ret = __wt_btcur_range_selectivity(start, stop, selectivity);
+    } else
+        ret = __session_range_cursor_table(
+          (WT_CURSOR_TABLE *)start, (WT_CURSOR_TABLE *)stop, selectivity);
+
+done:
+err:
+    /*
+     * Reset application cursors, they've possibly moved and the application cannot use them. Close
+     * any locally-opened cursors.
+     */
+    WT_TRET(start->reset(start));
+    WT_TRET(stop->reset(stop));
+
+    if (local_start)
+        WT_TRET(start->close(start));
+    if (local_stop)
+        WT_TRET(stop->close(stop));
+
+    return (ret);
+}
+
+/*
+ * __session_range_selectivity --
+ *     WT_SESSION->range_selectivity method.
+ */
+static int
+__session_range_selectivity(WT_SESSION *wt_session, WT_CURSOR *start, WT_CURSOR *stop,
+  const char *config, double *selectivity)
+{
+    WT_DECL_RET;
+    WT_SESSION_IMPL *session;
+
+    (void)start;
+    (void)stop;
+
+    *selectivity = 1;
+    session = (WT_SESSION_IMPL *)wt_session;
+    SESSION_API_CALL(session, ret, range_selectivity, config, cfg);
+
+    WT_UNUSED(cfg);
+    WT_STAT_CONN_INCR(session, cursor_range_selectivity);
+
+    /* Disallow objects in the WiredTiger name space. */
+    WT_ERR(__session_range_cursor(session, start, stop, selectivity));
+
+err:
+    if (ret != 0)
+        WT_STAT_CONN_INCR(session, session_table_range_selectivity_fail);
+    else
+        WT_STAT_CONN_INCR(session, session_table_range_selectivity_success);
+
+    API_END_RET(session, ret);
+}
+
+/*
  * __session_salvage_worker --
  *     Wrapper function for salvage processing.
  */
@@ -2489,7 +2642,7 @@ __open_session(WT_CONNECTION_IMPL *conn, WT_EVENT_HANDLER *event_handler, const 
       stds = {NULL, NULL, __session_close, __session_reconfigure, __wt_session_strerror,
         __session_open_cursor, __session_alter, __session_bind_configuration, __session_create,
         __wti_session_compact, __session_drop, __session_join, __session_log_flush,
-        __session_log_printf, __session_rename, __session_reset, __session_salvage,
+        __session_log_printf, __session_range_selectivity, __session_rename, __session_reset, __session_salvage,
         __session_truncate, __session_verify, __session_begin_transaction,
         __session_commit_transaction, __session_prepare_transaction, __session_rollback_transaction,
         __session_query_timestamp, __session_timestamp_transaction,
@@ -2499,7 +2652,7 @@ __open_session(WT_CONNECTION_IMPL *conn, WT_EVENT_HANDLER *event_handler, const 
         __session_open_cursor, __session_alter_readonly, __session_bind_configuration,
         __session_create_readonly, __wti_session_compact_readonly, __session_drop_readonly,
         __session_join_notsup, __session_log_flush_readonly, __session_log_printf_readonly,
-        __session_rename_readonly, __session_reset_notsup, __session_salvage_readonly,
+        __session_range_selectivity, __session_rename_readonly, __session_reset_notsup, __session_salvage_readonly,
         __session_truncate_readonly, __session_verify_notsup, __session_begin_transaction_notsup,
         __session_commit_transaction_notsup, __session_prepare_transaction_readonly,
         __session_rollback_transaction_notsup, __session_query_timestamp_notsup,
@@ -2511,7 +2664,7 @@ __open_session(WT_CONNECTION_IMPL *conn, WT_EVENT_HANDLER *event_handler, const 
         __session_open_cursor, __session_alter_readonly, __session_bind_configuration,
         __session_create_readonly, __wti_session_compact_readonly, __session_drop_readonly,
         __session_join, __session_log_flush_readonly, __session_log_printf_readonly,
-        __session_rename_readonly, __session_reset, __session_salvage_readonly,
+        __session_range_selectivity, __session_rename_readonly, __session_reset, __session_salvage_readonly,
         __session_truncate_readonly, __session_verify, __session_begin_transaction,
         __session_commit_transaction, __session_prepare_transaction_readonly,
         __session_rollback_transaction, __session_query_timestamp, __session_timestamp_transaction,

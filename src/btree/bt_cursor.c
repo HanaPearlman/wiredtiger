@@ -2217,6 +2217,257 @@ err:
 }
 
 /*
+ * __cursor_range_selectivity_do_traversal_step --
+ *     Binary search of an internal page to find the index of the next page to visit. Returns the
+ *     index in indx_ptr and the page in descent_ptr.
+ */
+static int
+__cursor_range_selectivity_do_traversal_step(WT_ITEM *srch_key, WT_SESSION_IMPL *session,
+  WT_COLLATOR *collator, WT_CURSOR_BTREE *cbt, WT_PAGE *page, WT_PAGE_INDEX *parent_pindex,
+  WT_PAGE_INDEX *pindex, WT_REF *current, WT_REF **descent_ptr, uint32_t *indx_ptr)
+{
+    WT_ITEM *item;
+
+    size_t match, skiphigh, skiplow;
+    uint32_t base, limit;
+    int cmp;
+
+    item = cbt->tmp;
+    *indx_ptr = 0;
+    base = 1;
+    limit = pindex->entries - 1;
+
+    /*
+     * Binary search of an internal page. This is largely copied from row_srch.c
+     */
+    if (collator == NULL && srch_key->size <= WT_COMPARE_SHORT_MAXLEN)
+        for (; limit != 0; limit >>= 1) {
+            *indx_ptr = base + (limit >> 1);
+            *descent_ptr = pindex->index[*indx_ptr];
+            __wt_ref_key(page, *descent_ptr, &item->data, &item->size);
+
+            cmp = __wt_lex_compare_short(srch_key, item);
+            if (cmp > 0) {
+                base = *indx_ptr + 1;
+                --limit;
+            } else if (cmp == 0)
+                return (0);
+        }
+    else if (collator == NULL) {
+        skiphigh = skiplow = 0;
+        for (; limit != 0; limit >>= 1) {
+            *indx_ptr = base + (limit >> 1);
+            *descent_ptr = pindex->index[*indx_ptr];
+            __wt_ref_key(page, *descent_ptr, &item->data, &item->size);
+
+            match = WT_MIN(skiplow, skiphigh);
+            cmp = __wt_lex_compare_skip(session, srch_key, item, &match);
+            if (cmp > 0) {
+                skiplow = match;
+                base = *indx_ptr + 1;
+                --limit;
+            } else if (cmp < 0)
+                skiphigh = match;
+            else
+                return (0);
+        }
+    } else {
+        for (; limit != 0; limit >>= 1) {
+            *indx_ptr = base + (limit >> 1);
+            *descent_ptr = pindex->index[*indx_ptr];
+            __wt_ref_key(page, *descent_ptr, &item->data, &item->size);
+
+            WT_RET(__wt_compare(session, collator, srch_key, item, &cmp));
+            if (cmp > 0) {
+                base = *indx_ptr + 1;
+                --limit;
+            } else if (cmp == 0)
+                return (0);
+        }
+    }
+
+    /*
+     * Set the slot to descend the tree: descent was already set if there was an exact match on the
+     * page, otherwise, base is the smallest index greater than key, possibly one past the last
+     * slot.
+     */
+    *descent_ptr = pindex->index[base - 1];
+
+    /*
+     * If on the last slot (the key is larger than any key on the page), check for an internal page
+     * split race.
+     */
+    return ((pindex->entries == base && __wt_split_descent_race(session, current, parent_pindex)) ?
+        WT_RESTART :
+        0);
+}
+
+/*
+ * __cursor_range_selectivity--
+ *     Return cursor statistics for a cursor range from the tree.
+ */
+static int
+__cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double *selectivityp)
+{
+    WT_DECL_RET;
+    WT_ITEM kstart, kstop;
+    WT_SESSION_IMPL *session;
+
+    WT_BTREE *btree;
+    WT_COLLATOR *collator;
+
+    WT_PAGE *page_start, *page_stop;
+    WT_PAGE_INDEX *parent_pindex_start, *pindex_start, *parent_pindex_stop, *pindex_stop;
+    WT_REF *current_start, *descent_start, *current_stop, *descent_stop;
+    uint32_t indx_start, indx_stop, read_flags;
+    int depth;
+    double percentile_start, percentile_stop;
+    double selectivity_start_node, selectivity_stop_node;
+    bool diverged;
+
+    session = CUR2S(start);
+    btree = S2BT(session);
+    collator = btree->collator;
+
+    /* WT_RET(__wt_debug_tree(session, btree, NULL, "/home/ubuntu/wiredtiger/build/test.out")); */
+
+    current_start = current_stop = NULL;
+    descent_start = descent_stop = NULL;
+
+    /* Get the key. */
+    WT_RET(__wt_cursor_get_raw_key((WT_CURSOR *)start, &kstart));
+    WT_RET(__wt_cursor_get_raw_key((WT_CURSOR *)stop, &kstop));
+
+    /**
+     * TODO: there is wasted work in this function; we don't need to do everything twice until the
+     * traversals diverge.
+     */
+    __cursor_pos_clear(start);
+    __cursor_pos_clear(stop);
+
+    if (0) {
+restart:
+        /*
+         * Discard the currently held page and restart the search from the root.
+         */
+        WT_RET(__wt_page_release(session, current_start, 0));
+        WT_RET(__wt_page_release(session, current_stop, 0));
+    }
+
+    diverged = false;
+
+    /**
+     * Search the internal pages of the tree simultaneously for the start and stop keys.
+     */
+    current_start = current_stop = &btree->root;
+    percentile_start = percentile_stop = 0;
+    selectivity_start_node = selectivity_stop_node = 1;
+    for (depth = 2, pindex_start = pindex_stop = NULL;; ++depth) {
+        parent_pindex_start = pindex_start;
+        page_start = current_start->page;
+
+        parent_pindex_stop = pindex_stop;
+        page_stop = current_stop->page;
+
+        /* Leaves are equidistant from the root; if 'start' has hit a leaf, 'stop' has too. */
+        if (page_start->type != WT_PAGE_ROW_INT)
+            break;
+
+        WT_INTL_INDEX_GET(session, page_start, pindex_start);
+        WT_INTL_INDEX_GET(session, page_stop, pindex_stop);
+
+        /* Binary search to find the next page for the start key. */
+        ret = __cursor_range_selectivity_do_traversal_step(&kstart, session, collator, start,
+          page_start, parent_pindex_start, pindex_start, current_start, &descent_start,
+          &indx_start);
+        if (ret == WT_RESTART) {
+            goto restart;
+        }
+        WT_ERR(ret);
+
+        /* Binary search to find the next page for the stop key. */
+        ret = __cursor_range_selectivity_do_traversal_step(&kstop, session, collator, start,
+          page_stop, parent_pindex_stop, pindex_stop, current_stop, &descent_stop, &indx_stop);
+        if (ret == WT_RESTART) {
+            goto restart;
+        }
+        WT_ERR(ret);
+
+        /**
+         * If there are 'n' children under the current node and the next node to visit for key 'k'
+         * is at child 'i', then we say that at least (i-1)/n of the entries under the current node
+         * are <=k. The next iteration of traversal will determine what fraction of the 'i'th
+         * child's entries are <=k.
+         *
+         * This estimation assumes that entries are equally distributed among the children of the
+         * node (i.e., each child is responsible for 1/n fraction of entries).
+         */
+        percentile_start +=
+          ((double)(indx_start - 1) / pindex_start->entries) * selectivity_start_node;
+        percentile_stop += ((double)(indx_stop - 1) / pindex_stop->entries) * selectivity_stop_node;
+
+        selectivity_start_node *= (double)1 / pindex_start->entries;
+        selectivity_stop_node *= (double)1 / pindex_stop->entries;
+        diverged |= (indx_start != indx_stop);
+
+        /*
+         * Swap the current page(s) for the child page(s). If the page splits while we're retrieving
+         * it, restart the search at the root.
+         */
+        read_flags = WT_READ_RESTART_OK;
+        if (F_ISSET(start, WT_CBT_READ_ONCE))
+            FLD_SET(read_flags, WT_READ_WONT_NEED);
+        if ((ret = __wt_page_swap(session, current_start, descent_start, read_flags)) == 0) {
+            current_start = descent_start;
+            if ((ret = __wt_page_swap(session, current_stop, descent_stop, read_flags)) == 0) {
+                current_stop = descent_stop;
+                continue;
+            }
+        }
+        if (ret == WT_RESTART)
+            goto restart;
+        return (ret);
+    }
+
+    if (diverged) {
+        /* We reached different leaves. Assume each key matches 1/4 of each respective leaf. TODO.*/
+        percentile_start += 0.25 * selectivity_start_node;
+        percentile_stop += 0.25 * selectivity_stop_node;
+        *selectivityp = percentile_stop - percentile_start;
+    } else {
+        /* We reached the same leaf node, so just assume that we match 1/4 of the entries. TODO. */
+        *selectivityp = 0.25 * selectivity_start_node;
+    }
+
+err:
+    WT_TRET(__wt_page_release(session, current_start, 0));
+    WT_TRET(__wt_page_release(session, current_stop, 0));
+    return (ret);
+}
+
+/*
+ * __wt_btcur_range_selectivity --
+ *     Return selectivity estimate for a cursor range from the tree.
+ */
+int
+__wt_btcur_range_selectivity(WT_CURSOR *start, WT_CURSOR *stop, double *selectivityp)
+{
+    WT_CURSOR_BTREE *bt_start, *bt_stop;
+    WT_DECL_RET;
+    WT_SESSION_IMPL *session;
+
+    session = CUR2S(start);
+
+    bt_start = (WT_CURSOR_BTREE *)start;
+    bt_stop = (WT_CURSOR_BTREE *)stop;
+
+    WT_WITH_BTREE(session, CUR2BT(bt_start),
+      WT_WITH_PAGE_INDEX(
+        session, ret = __cursor_range_selectivity(bt_start, bt_stop, selectivityp)));
+    return (ret);
+}
+
+/*
  * __wt_btcur_init --
  *     Initialize a cursor used for internal purposes.
  */

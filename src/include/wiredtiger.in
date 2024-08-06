@@ -1563,6 +1563,33 @@ struct __wt_session {
     int __F(rename)(WT_SESSION *session,
         const char *uri, const char *newuri, const char *config);
 
+	/*!
+	 * Return estimated selectivity of a given key range.
+	 *
+	 * The information is an estimate based on assumptions about the distribution of information
+     * in the object.
+	 *
+	 * It is not required the cursor reference a record in the object, only that the key be set.
+     * This allows applications to query portions of the object name space without knowing exactly
+     * what records the object contains.
+	 *
+	 * Any specified cursors end with no position, and subsequent calls to the WT_CURSOR::next
+	 * (WT_CURSOR::prev) method will iterate from the beginning (end) of the table.
+	 *
+	 * @param session the session handle
+	 * @param start optional cursor marking the first record of the range; if <code>NULL</code>,
+	 * the range starts from the beginning of the object
+	 * @param stop optional cursor marking the last record of the range; if <code>NULL</code>,
+	 * the range continues to the end of the object
+     * @configempty{WT_SESSION.range_selectivity, see dist/api_data.py}
+	 * @param selectivityp the returned selectivity
+	 * @errors
+	 */
+	int __F(range_selectivity)(WT_SESSION *session,
+	    WT_CURSOR *start,
+	    WT_CURSOR *stop,
+	    const char *config, double *selectivityp);
+
     /*!
      * Reset the session handle.
      *

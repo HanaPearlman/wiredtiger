@@ -178,7 +178,7 @@ WT_CONF_API_DECLARE(GLOBAL, wiredtiger_open_all, 22, 166);
 WT_CONF_API_DECLARE(GLOBAL, wiredtiger_open_basecfg, 22, 160);
 WT_CONF_API_DECLARE(GLOBAL, wiredtiger_open_usercfg, 22, 159);
 
-#define WT_CONF_API_ELEMENTS 56
+#define WT_CONF_API_ELEMENTS 57
 
 /*
  * Per-API configuration structure declarations: END
