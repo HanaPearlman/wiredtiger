@@ -59,7 +59,8 @@ class test_range_selectivity(wttest.WiredTigerTestCase):
         cstop.set_key(ds.key(13000))
 
         # TODO: how do I make range_selectivity return a value here?
-        self.session.range_selectivity(cstart, cstop)
+        sel = self.session.range_selectivity(cstart, cstop)
+        print(sel)
 
 
 if __name__ == '__main__':
