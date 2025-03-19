@@ -87,6 +87,9 @@ from packing import pack, unpack
 %typemap(in, numinputs=0) bool * (bool temp = false) {
 	$1 = &temp;
  }
+%typemap(in, numinputs=0) double * (double temp = 1) {
+	$1 = &temp;
+ }
 %typemap(in, numinputs=0) wt_off_t * (wt_off_t temp = false) {
 	$1 = &temp;
 }
@@ -233,6 +236,10 @@ from packing import pack, unpack
 
 %typemap(argout) bool * {
 	$result = PyBool_FromLong(*$1);
+}
+
+%typemap(argout) double * {
+	$result = PyFloat_FromDouble(*$1);
 }
 
 %typemap(argout) wt_off_t * {
@@ -1046,15 +1053,9 @@ typedef int int_void;
 	}
 
 	/* range_selectivity: special handling. */
-	int _range_selectivity(WT_CURSOR *start, WT_CURSOR *stop) {
-
-		double selectivity;
-
-		int ret = $self->range_selectivity($self, start, stop, NULL, &selectivity);
-		fprintf(stderr, "%d: selectivity %lf\n", ret, selectivity);
-
-		// return ((ret != 0) ? ret : (cmp < 0) ? -1 : (cmp == 0) ? 0 : 1);
-
+	// TODO: why is this needed to find the attribute on session?
+	int _range_selectivity(WT_CURSOR *start, WT_CURSOR *stop, double* selectivity) {
+		int ret = $self->range_selectivity($self, start, stop, NULL, selectivity);
 		return (ret);
 	}
 
