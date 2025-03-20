@@ -1054,6 +1054,7 @@ typedef int int_void;
 
 	/* range_selectivity: special handling. */
 	// TODO: why is this needed to find the attribute on session?
+	// TODO: what to do about URI?
 	int _range_selectivity(WT_CURSOR *start, WT_CURSOR *stop, double* selectivity) {
 		int ret = $self->range_selectivity($self, start, stop, NULL, selectivity);
 		return (ret);
