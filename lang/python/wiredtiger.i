@@ -641,13 +641,11 @@ COMPARE_NOTFOUND_OK(__wt_cursor::_search_near)
 /* Next, override methods that return integers via arguments. */
 %ignore __wt_cursor::compare(WT_CURSOR *, WT_CURSOR *, int *);
 %ignore __wt_cursor::equals(WT_CURSOR *, WT_CURSOR *, int *);
-%ignore __wt_cursor::search_near(WT_CURSOR *, int *); // todo: do I need one of these?
-// TODO: model after get_rollback_reason or search_near? we don't actually wanna return int...
+%ignore __wt_cursor::search_near(WT_CURSOR *, int *);
 
 OVERRIDE_METHOD(__wt_cursor, WT_CURSOR, compare, (self, other))
 OVERRIDE_METHOD(__wt_cursor, WT_CURSOR, equals, (self, other))
 OVERRIDE_METHOD(__wt_cursor, WT_CURSOR, search_near, (self))
-OVERRIDE_METHOD(__wt_session, WT_SESSION, range_selectivity, (self, uri, start, stop)) // todo: shouldn't this be symmetric with above?
 
 /* SWIG magic to turn Python byte strings into data / size. */
 %apply (char *STRING, int LENGTH) { (char *data, int size) };
