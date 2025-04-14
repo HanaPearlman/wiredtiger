@@ -2326,7 +2326,6 @@ __cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double
     WT_PAGE_INDEX *parent_pindex_start, *pindex_start, *parent_pindex_stop, *pindex_stop;
     WT_REF *current_start, *descent_start, *current_stop, *descent_stop;
     uint32_t indx_start, indx_stop, read_flags;
-    int depth;
     double percentile_start, percentile_stop;
     double selectivity_start_node, selectivity_stop_node;
     bool diverged;
@@ -2368,7 +2367,8 @@ restart:
     current_start = current_stop = &btree->root;
     percentile_start = percentile_stop = 0;
     selectivity_start_node = selectivity_stop_node = 1;
-    for (depth = 2, pindex_start = pindex_stop = NULL;; ++depth) {
+    pindex_start = pindex_stop = NULL;
+    while (true) {
         parent_pindex_start = pindex_start;
         page_start = current_start->page;
 
@@ -2409,11 +2409,11 @@ restart:
          * node (i.e., each child is responsible for 1/n fraction of entries).
          */
         percentile_start +=
-          ((double)(indx_start - 1) / pindex_start->entries) * selectivity_start_node;
-        percentile_stop += ((double)(indx_stop - 1) / pindex_stop->entries) * selectivity_stop_node;
+          ((double)(indx_start - 1) / (double)(pindex_start->entries - 1)) * selectivity_start_node;
+        percentile_stop += ((double)(indx_stop - 1) / (double)(pindex_start->entries - 1)) * selectivity_stop_node;
 
-        selectivity_start_node *= (double)1 / pindex_start->entries;
-        selectivity_stop_node *= (double)1 / pindex_stop->entries;
+        selectivity_start_node *= (double)1 / (double)(pindex_start->entries - 1);
+        selectivity_stop_node *= (double)1 / (double)(pindex_start->entries - 1);
         diverged |= (indx_start != indx_stop);
 
         /*
