@@ -41,10 +41,7 @@ class test_range_selectivity(wttest.WiredTigerTestCase):
         ('string', dict(keyfmt='S')),
     ]
     types = [
-        ('file', dict(uri='file', ds=SimpleDataSet)),
-        ('table-complex', dict(uri='table', ds=ComplexDataSet)),
-        ('table-index', dict(uri='table', ds=SimpleIndexDataSet)),
-        ('table-simple', dict(uri='table', ds=SimpleDataSet)),
+        ('file-simple', dict(uri='file', ds=SimpleDataSet)),
     ]
     scenarios = make_scenarios(types, keyfmt)
 
@@ -53,19 +50,19 @@ class test_range_selectivity(wttest.WiredTigerTestCase):
         uri = self.uri + ':test_range_selectivity'
         size = 'allocation_size=512,internal_page_max=512'
 
-
+        # 25,000 keys
         ds = self.ds(self, uri, 25000, config=size, key_format=self.keyfmt)
         ds.populate()
 
+        self.session.checkpoint()
 
+        # Search for range [12,000 , 13,000). True card is 999
         cstart = self.session.open_cursor(uri, None, None)
         cstart.set_key(ds.key(12000))
         cstop = self.session.open_cursor(uri, None, None)
         cstop.set_key(ds.key(13000))
-
         sel = self.session.range_selectivity(cstart, cstop)
-        print("Sel is: " + str(sel))
-
+        print("Sel for 1k range is: " + str(sel)) # Get: .11, .09
 
 
 

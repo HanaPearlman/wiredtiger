@@ -2223,6 +2223,134 @@ err:
 }
 
 /*
+ * __cursor_range_selectivity_get_leaf_idx --
+ *      Binary search of an leaf page. Returns the smallest index greater than or equal to the key
+ *      (srch_key) in indx_ptr.
+ */
+static int
+__cursor_range_selectivity_get_leaf_idx(WT_ITEM *srch_key, WT_SESSION_IMPL *session,
+  WT_COLLATOR *collator, WT_CURSOR_BTREE *cbt, WT_PAGE *page, WT_REF *current, uint32_t *indx_ptr)
+{
+    WT_DECL_RET;
+
+    WT_ITEM *item;
+    size_t match, skiphigh, skiplow;
+    uint32_t base, limit, indx;
+    int cmp;
+    WT_ROW *rip;
+    WT_INSERT_HEAD *ins_head;
+
+    /*
+     * Binary search of a leaf page. This is largely copied from row_srch.c
+     */
+    page = current->page;
+    cbt->ref = current;
+    item = cbt->tmp;
+
+    /*
+     * Clear current now that we have moved the reference into the btree cursor, so that cleanup
+     * never releases twice.
+     */
+    current = NULL;
+
+    /*
+     * Binary search of an leaf page. There are three versions (keys with no application-specified
+     * collation order, in long and short versions, and keys with an application-specified collation
+     * order), because doing the tests and error handling inside the loop costs about 5%.
+     */
+    base = 0;
+    limit = page->entries;
+    if (collator == NULL && srch_key->size <= WT_COMPARE_SHORT_MAXLEN)
+        for (; limit != 0; limit >>= 1) {
+            indx = base + (limit >> 1);
+            rip = page->pg_row + indx;
+            WT_ERR(__wt_row_leaf_key(session, page, rip, item, true));
+
+            cmp = __wt_lex_compare_short(srch_key, item);
+            if (cmp > 0) {
+                base = indx + 1;
+                --limit;
+            } else if (cmp == 0)
+                goto leaf_match;
+        }
+    else if (collator == NULL) {
+        /*
+         * In some cases we expect we're comparing more than a few keys with matching prefixes, so
+         * it's faster to avoid the memory fetches by skipping over those prefixes. That's done by
+         * tracking the length of the prefix match for the lowest and highest keys we've seen
+         * previously.
+         *
+         * Normally we'd expect every parent page's skippable prefixes to be shorter than the
+         * prefixes we can skip in the child page, and so we'd skip increasingly longer prefixes as
+         * we walk down the tree (in other words, if we can skip N bytes on the parent, we can skip
+         * at least N bytes on the child). However, if the search threads cache this skippable
+         * prefix size as they move down the tree, and if the tree structure changes in parallel -
+         * for example page splits reducing the child pages key space or a keys destined for a
+         * now-deleted sibling page being inserted into the current page - the skippable prefix can
+         * be incorrect for the page. To protect against this we reset the skippable prefix length
+         * each time we move to a new page.
+         */
+        skiphigh = skiplow = 0;
+
+        for (; limit != 0; limit >>= 1) {
+            indx = base + (limit >> 1);
+            rip = page->pg_row + indx;
+            WT_ERR(__wt_row_leaf_key(session, page, rip, item, true));
+
+            match = WT_MIN(skiplow, skiphigh);
+            cmp = __wt_lex_compare_skip(session, srch_key, item, &match);
+            if (cmp > 0) {
+                skiplow = match;
+                base = indx + 1;
+                --limit;
+            } else if (cmp < 0)
+                skiphigh = match;
+            else
+                goto leaf_match;
+        }
+    } else {
+        WT_ERR_MSG(session, WT_ERROR, "Collator not supported!");
+    }
+
+    /*
+     * The best case is finding an exact match in the leaf page's WT_ROW array, probable for any
+     * read-mostly workload. Check that case and get out fast.
+     */
+    if (0) {
+leaf_match:
+        // TODO: handle skip list entries?
+        *indx_ptr = WT_ROW_SLOT(page, rip);
+        return (0);
+    }
+
+    /*
+     * We didn't find an exact match in the WT_ROW array.
+     *
+     * Base is the smallest index greater than key and may be the 0th index or the (last + 1) index.
+     * If base is the 0th index it means the key is before any key found on the page.
+     */
+    if (base == 0) {
+        *indx_ptr = 0;
+
+        F_SET(cbt, WT_CBT_SEARCH_SMALLEST);
+        ins_head = WT_ROW_INSERT_SMALLEST(page);
+    } else {
+        *indx_ptr = base - 1;
+
+        ins_head = WT_ROW_INSERT_SLOT(page, cbt->slot);
+    }
+
+    if (WT_SKIP_FIRST(ins_head) == NULL)
+        return (0);
+    
+    WT_ERR_MSG(session, WT_ERROR, "Found a leaf with pending insert entries. Did you forget to checkpoint?");
+
+err:
+    WT_TRET(__wt_page_release(session, current, 0));
+    return (ret);
+}
+
+/*
  * __cursor_range_selectivity_do_traversal_step --
  *     Binary search of an internal page to find the index of the next page to visit. Returns the
  *     index in indx_ptr and the page in descent_ptr.
@@ -2232,6 +2360,7 @@ __cursor_range_selectivity_do_traversal_step(WT_ITEM *srch_key, WT_SESSION_IMPL 
   WT_COLLATOR *collator, WT_CURSOR_BTREE *cbt, WT_PAGE *page, WT_PAGE_INDEX *parent_pindex,
   WT_PAGE_INDEX *pindex, WT_REF *current, WT_REF **descent_ptr, uint32_t *indx_ptr)
 {
+    WT_DECL_RET;
     WT_ITEM *item;
 
     size_t match, skiphigh, skiplow;
@@ -2278,18 +2407,7 @@ __cursor_range_selectivity_do_traversal_step(WT_ITEM *srch_key, WT_SESSION_IMPL 
                 return (0);
         }
     } else {
-        for (; limit != 0; limit >>= 1) {
-            *indx_ptr = base + (limit >> 1);
-            *descent_ptr = pindex->index[*indx_ptr];
-            __wt_ref_key(page, *descent_ptr, &item->data, &item->size);
-
-            WT_RET(__wt_compare(session, collator, srch_key, item, &cmp));
-            if (cmp > 0) {
-                base = *indx_ptr + 1;
-                --limit;
-            } else if (cmp == 0)
-                return (0);
-        }
+        WT_ERR_MSG(session, WT_ERROR, "Collator not supported!");
     }
 
     /*
@@ -2306,6 +2424,10 @@ __cursor_range_selectivity_do_traversal_step(WT_ITEM *srch_key, WT_SESSION_IMPL 
     return ((pindex->entries == base && __wt_split_descent_race(session, current, parent_pindex)) ?
         WT_RESTART :
         0);
+
+err:
+    WT_TRET(__wt_page_release(session, current, 0));
+    return (ret);
 }
 
 /*
@@ -2325,7 +2447,7 @@ __cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double
     WT_PAGE *page_start, *page_stop;
     WT_PAGE_INDEX *parent_pindex_start, *pindex_start, *parent_pindex_stop, *pindex_stop;
     WT_REF *current_start, *descent_start, *current_stop, *descent_stop;
-    uint32_t indx_start, indx_stop, read_flags;
+    uint32_t indx_start, indx_stop, read_flags, leaf_count;
     double percentile_start, percentile_stop;
     double selectivity_start_node, selectivity_stop_node;
     bool diverged;
@@ -2343,6 +2465,7 @@ __cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double
     WT_RET(__wt_cursor_get_raw_key((WT_CURSOR *)start, &kstart));
     WT_RET(__wt_cursor_get_raw_key((WT_CURSOR *)stop, &kstop));
 
+    // TODO: could look at  btree->maximum_depth if that's useful to telling how deep to traverse.
     /**
      * TODO: there is wasted work in this function; we don't need to do everything twice until the
      * traversals diverge.
@@ -2382,6 +2505,10 @@ restart:
         WT_INTL_INDEX_GET(session, page_start, pindex_start);
         WT_INTL_INDEX_GET(session, page_stop, pindex_stop);
 
+        if (pindex_start->entries == 1 || pindex_stop->entries == 1) {
+            WT_ERR_MSG(session, WT_ERROR, "Found a page without(?) child pages. Did you forget to checkpoint?");
+        }
+
         /* Binary search to find the next page for the start key. */
         ret = __cursor_range_selectivity_do_traversal_step(&kstart, session, collator, start,
           page_start, parent_pindex_start, pindex_start, current_start, &descent_start,
@@ -2410,10 +2537,10 @@ restart:
          */
         percentile_start +=
           ((double)(indx_start - 1) / (double)(pindex_start->entries - 1)) * selectivity_start_node;
-        percentile_stop += ((double)(indx_stop - 1) / (double)(pindex_start->entries - 1)) * selectivity_stop_node;
+        percentile_stop += ((double)(indx_stop - 1) / (double)(pindex_stop->entries - 1)) * selectivity_stop_node;
 
         selectivity_start_node *= (double)1 / (double)(pindex_start->entries - 1);
-        selectivity_stop_node *= (double)1 / (double)(pindex_start->entries - 1);
+        selectivity_stop_node *= (double)1 / (double)(pindex_stop->entries - 1);
         diverged |= (indx_start != indx_stop);
 
         /*
@@ -2441,8 +2568,25 @@ restart:
         percentile_stop += 0.25 * selectivity_stop_node;
         *selectivityp = percentile_stop - percentile_start;
     } else {
-        /* We reached the same leaf node, so just assume that we match 1/4 of the entries. TODO. */
-        *selectivityp = 0.25 * selectivity_start_node;
+        /* We reached the same leaf. Find the number of matching keys in the leaf's entries  */
+        leaf_count = current_start->page->entries;
+        if (leaf_count == 0) {
+            WT_ERR_MSG(session, WT_ERROR, "Found a leaf without entries. Did you forget to checkpoint?");
+        }
+
+        ret = __cursor_range_selectivity_get_leaf_idx(&kstart, session, collator, start, page_start, current_start, &indx_start);
+        if (ret == WT_RESTART) {
+            goto restart;
+        }
+        WT_ERR(ret);        
+
+        ret = __cursor_range_selectivity_get_leaf_idx(&kstop, session, collator, stop, page_stop, current_stop, &indx_stop);
+        if (ret == WT_RESTART) {
+            goto restart;
+        }
+        WT_ERR(ret);
+
+        *selectivityp = ((double)(indx_stop - indx_start + 1)/leaf_count) * selectivity_start_node;
     }
 
 err:
