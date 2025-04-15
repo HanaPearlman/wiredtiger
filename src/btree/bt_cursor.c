@@ -2344,7 +2344,6 @@ leaf_match:
         return (0);
     
     WT_ERR_MSG(session, WT_ERROR, "Found a leaf with pending insert entries. Did you forget to checkpoint?");
-    return (0);
 
 err:
     WT_TRET(__wt_page_release(session, current, 0));
