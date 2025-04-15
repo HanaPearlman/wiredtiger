@@ -1331,32 +1331,6 @@ err:
 }
 
 /*
- * __session_range_cursor_table --
- *     Session handling of the range stat method with table cursors.
- */
-static int
-__session_range_cursor_table(WT_CURSOR_TABLE *start, WT_CURSOR_TABLE *stop, double *selectivityp)
-{
-    WT_DECL_RET;
-    double selectivity;
-    u_int i;
-
-    /* TODO Hana. Set the number of rows from one column group -- which? Does it matter? What are
-     * these different cursors? When does mongod create column groups? */
-    selectivity = 0; /* [-Wconditional-uninitialized] */
-    for (i = 0; i < WT_COLGROUPS(start->table); i++) {
-        selectivity = 0;
-        WT_ERR(
-          __wt_btcur_range_selectivity(start->cg_cursors[i], stop->cg_cursors[i], &selectivity));
-        fprintf(stderr, "    i: %u selectivity %lf\n", i, selectivity);
-    }
-    *selectivityp = selectivity;
-
-err:
-    return (ret);
-}
-
-/*
  * __session_range_cursor --
  *     Session handling of the range ce method with cursors.
  */
@@ -1429,9 +1403,9 @@ __session_range_cursor(
 
     if (WT_PREFIX_MATCH(start->internal_uri, "file:")) {
         ret = __wt_btcur_range_selectivity(start, stop, selectivity);
-    } else
-        ret = __session_range_cursor_table(
-          (WT_CURSOR_TABLE *)start, (WT_CURSOR_TABLE *)stop, selectivity);
+    } else {
+        WT_ERR_MSG(session, WT_ERROR, "TABLE not supported");
+    }
 
 done:
 err:
