@@ -2226,6 +2226,7 @@ err:
  * __cursor_range_selectivity_get_leaf_idx --
  *      Binary search of an leaf page. Returns the smallest index greater than or equal to the key
  *      (srch_key) in indx_ptr.
+ *      indx_ptr will be in range [0, entries - 1]
  */
 static int
 __cursor_range_selectivity_get_leaf_idx(WT_ITEM *srch_key, WT_SESSION_IMPL *session,
@@ -2354,6 +2355,7 @@ err:
  * __cursor_range_selectivity_do_traversal_step --
  *     Binary search of an internal page to find the index of the next page to visit. Returns the
  *     index in indx_ptr and the page in descent_ptr.
+ *     indx_ptr will be in range [1, pindex->entries - 1]
  */
 static int
 __cursor_range_selectivity_do_traversal_step(WT_ITEM *srch_key, WT_SESSION_IMPL *session,
@@ -2447,16 +2449,15 @@ __cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double
     WT_PAGE *page_start, *page_stop;
     WT_PAGE_INDEX *parent_pindex_start, *pindex_start, *parent_pindex_stop, *pindex_stop;
     WT_REF *current_start, *descent_start, *current_stop, *descent_stop;
-    uint32_t indx_start, indx_stop, read_flags, leaf_count;
+    uint32_t indx_start, indx_stop, read_flags, start_leaf_count, stop_leaf_count;
     double percentile_start, percentile_stop;
     double selectivity_start_node, selectivity_stop_node;
-    bool diverged;
 
     session = CUR2S(start);
     btree = S2BT(session);
     collator = btree->collator;
 
-    /* WT_RET(__wt_debug_tree(session, btree, NULL, "/home/ubuntu/wiredtiger/build/test.out")); */
+    // WT_RET(__wt_debug_tree(session, btree, NULL, "/home/ubuntu/wiredtiger/build/test.out"));
 
     current_start = current_stop = NULL;
     descent_start = descent_stop = NULL;
@@ -2482,8 +2483,6 @@ restart:
         WT_RET(__wt_page_release(session, current_stop, 0));
     }
 
-    diverged = false;
-
     /**
      * Search the internal pages of the tree simultaneously for the start and stop keys.
      */
@@ -2505,6 +2504,8 @@ restart:
         WT_INTL_INDEX_GET(session, page_start, pindex_start);
         WT_INTL_INDEX_GET(session, page_stop, pindex_stop);
 
+        // TODO: we seem to hit this for really small trees (fit on one page).
+        // Something weird is going -- the leaf counts are not adding up for large range?
         if (pindex_start->entries == 1 || pindex_stop->entries == 1) {
             WT_ERR_MSG(session, WT_ERROR, "Found a page without(?) child pages. Did you forget to checkpoint?");
         }
@@ -2534,6 +2535,10 @@ restart:
          *
          * This estimation assumes that entries are equally distributed among the children of the
          * node (i.e., each child is responsible for 1/n fraction of entries).
+         *
+         * Note that the entries are 1-indexed. So if the index for k is 2, then there are (2-1)=1
+         * children with values guaranteed to be <= k. Note also that when searching for key k among
+         * entries, we expect to see index values between 1 and entries - 1 (N = entries - 1).
          */
         percentile_start +=
           ((double)(indx_start - 1) / (double)(pindex_start->entries - 1)) * selectivity_start_node;
@@ -2541,7 +2546,6 @@ restart:
 
         selectivity_start_node *= (double)1 / (double)(pindex_start->entries - 1);
         selectivity_stop_node *= (double)1 / (double)(pindex_stop->entries - 1);
-        diverged |= (indx_start != indx_stop);
 
         /*
          * Swap the current page(s) for the child page(s). If the page splits while we're retrieving
@@ -2562,32 +2566,31 @@ restart:
         return (ret);
     }
 
-    if (diverged) {
-        /* We reached different leaves. Assume each key matches 1/4 of each respective leaf. TODO.*/
-        percentile_start += 0.25 * selectivity_start_node;
-        percentile_stop += 0.25 * selectivity_stop_node;
-        *selectivityp = percentile_stop - percentile_start;
-    } else {
-        /* We reached the same leaf. Find the number of matching keys in the leaf's entries  */
-        leaf_count = current_start->page->entries;
-        if (leaf_count == 0) {
-            WT_ERR_MSG(session, WT_ERROR, "Found a leaf without entries. Did you forget to checkpoint?");
-        }
-
-        ret = __cursor_range_selectivity_get_leaf_idx(&kstart, session, collator, start, page_start, current_start, &indx_start);
-        if (ret == WT_RESTART) {
-            goto restart;
-        }
-        WT_ERR(ret);        
-
-        ret = __cursor_range_selectivity_get_leaf_idx(&kstop, session, collator, stop, page_stop, current_stop, &indx_stop);
-        if (ret == WT_RESTART) {
-            goto restart;
-        }
-        WT_ERR(ret);
-
-        *selectivityp = ((double)(indx_stop - indx_start + 1)/leaf_count) * selectivity_start_node;
+    // We reached a leaf node.
+    start_leaf_count = current_start->page->entries;
+    stop_leaf_count = current_stop->page->entries;
+    if (start_leaf_count == 0 || stop_leaf_count == 0) {
+        WT_ERR_MSG(session, WT_ERROR, "Found a leaf without entries. Did you forget to checkpoint?");
     }
+
+    ret = __cursor_range_selectivity_get_leaf_idx(&kstart, session, collator, start, page_start, current_start, &indx_start);
+    if (ret == WT_RESTART) {
+        goto restart;
+    }
+    WT_ERR(ret);
+
+    ret = __cursor_range_selectivity_get_leaf_idx(&kstop, session, collator, stop, page_stop, current_stop, &indx_stop);
+    if (ret == WT_RESTART) {
+        goto restart;
+    }
+    WT_ERR(ret);
+
+    // If base is the 0th index, it means the key is before any key found on the page or it
+    // is the first key on the page. In that case, we should add nothing to the percentile
+    // TODO: are there an off-by-one issues here?
+    percentile_start += ((double)(indx_start)/start_leaf_count) * selectivity_start_node;
+    percentile_stop += ((double)(indx_stop)/stop_leaf_count) * selectivity_stop_node;
+    *selectivityp = percentile_stop - percentile_start;
 
 err:
     WT_TRET(__wt_page_release(session, current_start, 0));
