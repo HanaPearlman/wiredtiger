@@ -2343,7 +2343,7 @@ leaf_match:
 
     if (WT_SKIP_FIRST(ins_head) == NULL)
         return (0);
-    
+
     WT_ERR_MSG(session, WT_ERROR, "Found a leaf with pending insert entries. Did you forget to checkpoint?");
 
 err:
@@ -2585,7 +2585,7 @@ restart:
     }
     WT_ERR(ret);
 
-    // If base is the 0th index, it means the key is before any key found on the page or it
+    // If indx_start is the 0th index, it means the key is before any key found on the page or it
     // is the first key on the page. In that case, we should add nothing to the percentile
     // TODO: are there an off-by-one issues here?
     percentile_start += ((double)(indx_start)/start_leaf_count) * selectivity_start_node;
