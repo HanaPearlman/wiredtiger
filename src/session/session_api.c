@@ -1362,30 +1362,30 @@ __session_range_cursor(
      */
     if (start != NULL && stop != NULL && start->compare != NULL) {
         WT_ERR(start->compare(start, stop, &cmp));
-        if (cmp > 0)
+        if (cmp > 0) {
+            *selectivity = 0;
             WT_ERR_MSG(
               session, EINVAL, "the start cursor position is after the stop cursor position");
+        }
     }
 
     /*
      * Statistics do not require keys actually exist so that applications can query parts of the
      * object's name space without knowing exactly what records currently appear in the object. For
-     * this reason, do a search-near, rather than a search. Additionally, we have to correct after
-     * calling search-near, to position the start/stop cursors on the next record greater than/less
-     * than the original key. If we fail to find a key in a search-near, there are no keys in the
-     * table. If we fail to move forward or backward in a range, there are no keys in the range. In
-     * either of those cases, we're done.
+     * this reason, do a search-near, rather than a search.
      */
+    // TODO: revisit if we need to correct after calling search-near, to position the start/stop
+    // cursors on the next record greater than/less than the original key
     if (start != NULL)
-        if ((ret = start->search_near(start, &cmp)) != 0 ||
-          (cmp < 0 && (ret = start->next(start)) != 0)) {
+        if ((ret = start->search_near(start, &cmp)) != 0) {
             WT_ERR_NOTFOUND_OK(ret, false);
+            *selectivity = 0;
             goto done;
         }
     if (stop != NULL)
-        if ((ret = stop->search_near(stop, &cmp)) != 0 ||
-          (cmp > 0 && (ret = stop->prev(stop)) != 0)) {
+        if ((ret = stop->search_near(stop, &cmp)) != 0) {
             WT_ERR_NOTFOUND_OK(ret, false);
+            *selectivity = 0;
             goto done;
         }
 
@@ -1404,8 +1404,10 @@ __session_range_cursor(
 
     /* If the start/stop keys are equal or cross, we're done, the range must be empty. */
     WT_ERR(start->compare(start, stop, &cmp));
-    if (cmp >= 0)
+    if (cmp >= 0) {
+        *selectivity = 0;
         goto done;
+    }
 
     if (WT_PREFIX_MATCH(start->internal_uri, "file:")) {
         ret = __wt_btcur_range_selectivity(start, stop, selectivity);
