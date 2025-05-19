@@ -2452,12 +2452,13 @@ __cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double
     uint32_t indx_start, indx_stop, read_flags, start_leaf_count, stop_leaf_count;
     double percentile_start, percentile_stop;
     double selectivity_start_node, selectivity_stop_node;
+    bool diverged;
 
     session = CUR2S(start);
     btree = S2BT(session);
     collator = btree->collator;
 
-    // WT_RET(__wt_debug_tree(session, btree, NULL, "/home/ubuntu/wiredtiger/build/test.out"));
+    // WT_RET(__wt_debug_tree(session, btree, NULL, "/home/ubuntu/wiredtiger2/build/test.out"));
 
     current_start = current_stop = NULL;
     descent_start = descent_stop = NULL;
@@ -2490,6 +2491,8 @@ restart:
     percentile_start = percentile_stop = 0;
     selectivity_start_node = selectivity_stop_node = 1;
     pindex_start = pindex_stop = NULL;
+    diverged = false;
+
     while (true) {
         parent_pindex_start = pindex_start;
         page_start = current_start->page;
@@ -2510,6 +2513,9 @@ restart:
             WT_ERR_MSG(session, WT_ERROR, "Found a page without(?) child pages. Did you forget to checkpoint?");
         }
 
+        // TODO: Ask Wt rep: Is it better to do the traversal steps together while the traversals
+        // have not diverged? Or is there some way to open cursors that ensures we get a consistent
+        // view of the tree?
         /* Binary search to find the next page for the start key. */
         ret = __cursor_range_selectivity_do_traversal_step(&kstart, session, collator, start,
           page_start, parent_pindex_start, pindex_start, current_start, &descent_start,
@@ -2547,6 +2553,10 @@ restart:
         selectivity_start_node *= (double)1 / (double)(pindex_start->entries - 1);
         selectivity_stop_node *= (double)1 / (double)(pindex_stop->entries - 1);
 
+        if (indx_start != indx_stop) {
+            diverged = true;
+        }
+
         /*
          * Swap the current page(s) for the child page(s). If the page splits while we're retrieving
          * it, restart the search at the root.
@@ -2579,7 +2589,12 @@ restart:
     }
     WT_ERR(ret);
 
-    ret = __cursor_range_selectivity_get_leaf_idx(&kstop, session, collator, stop, page_stop, current_stop, &indx_stop);
+    if (!diverged) {
+        ret = __cursor_range_selectivity_get_leaf_idx(&kstop, session, collator, start, page_start, current_start, &indx_stop);
+    } else {
+        ret = __cursor_range_selectivity_get_leaf_idx(&kstop, session, collator, stop, page_stop, current_stop, &indx_stop);
+    }
+
     if (ret == WT_RESTART) {
         goto restart;
     }
@@ -2589,7 +2604,11 @@ restart:
     // is the first key on the page. In that case, we should add nothing to the percentile
     // TODO: are there an off-by-one issues here?
     percentile_start += ((double)(indx_start)/start_leaf_count) * selectivity_start_node;
-    percentile_stop += ((double)(indx_stop)/stop_leaf_count) * selectivity_stop_node;
+    if (!diverged) {
+        percentile_stop += ((double)(indx_stop)/start_leaf_count) * selectivity_start_node;
+    } else {
+        percentile_stop += ((double)(indx_stop)/stop_leaf_count) * selectivity_stop_node;
+    }
     *selectivityp = percentile_stop - percentile_start;
 
 err:
