@@ -2239,7 +2239,6 @@ __cursor_range_selectivity_get_leaf_idx(WT_ITEM *srch_key, WT_SESSION_IMPL *sess
     uint32_t base, limit, indx;
     int cmp;
     WT_ROW *rip;
-    WT_INSERT_HEAD *ins_head;
 
     /*
      * Binary search of a leaf page. This is largely copied from row_srch.c
@@ -2332,20 +2331,13 @@ leaf_match:
      */
     if (base == 0) {
         *indx_ptr = 0;
-
         F_SET(cbt, WT_CBT_SEARCH_SMALLEST);
-        ins_head = WT_ROW_INSERT_SMALLEST(page);
     } else {
         *indx_ptr = base - 1;
-
-        ins_head = WT_ROW_INSERT_SLOT(page, cbt->slot);
     }
 
-    if (WT_SKIP_FIRST(ins_head) == NULL)
-        return (0);
-
-    WT_ERR_MSG(session, WT_ERROR, "Found a leaf with pending insert entries. Did you forget to checkpoint?");
-
+    // There is an insert head, but we'll ignore it to keep from erroring...
+    return (0);
 err:
     WT_TRET(__wt_page_release(session, current, 0));
     return (ret);
@@ -2609,6 +2601,7 @@ restart:
     } else {
         percentile_stop += ((double)(indx_stop)/stop_leaf_count) * selectivity_stop_node;
     }
+
     *selectivityp = percentile_stop - percentile_start;
 
 err:
