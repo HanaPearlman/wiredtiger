@@ -2428,6 +2428,8 @@ err:
  * __cursor_range_selectivity--
  *     Return cursor statistics for a cursor range from the tree.
  */
+// TODO: make it support very small ranges
+// TODO: fix negative sel
 static int
 __cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double *selectivityp)
 {
@@ -2460,10 +2462,6 @@ __cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double
     WT_RET(__wt_cursor_get_raw_key((WT_CURSOR *)stop, &kstop));
 
     // TODO: could look at  btree->maximum_depth if that's useful to telling how deep to traverse.
-    /**
-     * TODO: there is wasted work in this function; we don't need to do everything twice until the
-     * traversals diverge.
-     */
     __cursor_pos_clear(start);
     __cursor_pos_clear(stop);
 
@@ -2473,104 +2471,194 @@ restart:
          * Discard the currently held page and restart the search from the root.
          */
         WT_RET(__wt_page_release(session, current_start, 0));
-        WT_RET(__wt_page_release(session, current_stop, 0));
+        if (diverged) {
+            WT_RET(__wt_page_release(session, current_stop, 0));
+        }
     }
 
     /**
      * Search the internal pages of the tree simultaneously for the start and stop keys.
      */
-    current_start = current_stop = &btree->root;
+    current_start = &btree->root; // todo: current stop not initialized
+    diverged = false;
     percentile_start = percentile_stop = 0;
     selectivity_start_node = selectivity_stop_node = 1;
     pindex_start = pindex_stop = NULL;
-    diverged = false;
 
     while (true) {
-        parent_pindex_start = pindex_start;
-        page_start = current_start->page;
+        if (!diverged) {
+            parent_pindex_start = pindex_start;
+            page_start = current_start->page;
 
-        parent_pindex_stop = pindex_stop;
-        page_stop = current_stop->page;
+            if (page_start->type != WT_PAGE_ROW_INT)
+                break;
 
-        /* Leaves are equidistant from the root; if 'start' has hit a leaf, 'stop' has too. */
-        if (page_start->type != WT_PAGE_ROW_INT)
-            break;
+            WT_INTL_INDEX_GET(session, page_start, pindex_start);
 
-        WT_INTL_INDEX_GET(session, page_start, pindex_start);
-        WT_INTL_INDEX_GET(session, page_stop, pindex_stop);
+            if (pindex_start->entries == 1) {
+                WT_ERR_MSG(session, WT_ERROR, "Found a page without(?) child pages. Did you forget to checkpoint?");
+            }
 
-        // TODO: we seem to hit this for really small trees (fit on one page).
-        // Something weird is going -- the leaf counts are not adding up for large range?
-        if (pindex_start->entries == 1 || pindex_stop->entries == 1) {
-            WT_ERR_MSG(session, WT_ERROR, "Found a page without(?) child pages. Did you forget to checkpoint?");
-        }
+            /* Binary search to find the next page for the start key. */
+            ret = __cursor_range_selectivity_do_traversal_step(&kstart, session, collator, start,
+            page_start, parent_pindex_start, pindex_start, current_start, &descent_start,
+            &indx_start);
+            if (ret == WT_RESTART) {
+                goto restart;
+            }
+            WT_ERR(ret);
 
-        // TODO: Ask Wt rep: Is it better to do the traversal steps together while the traversals
-        // have not diverged? Or is there some way to open cursors that ensures we get a consistent
-        // view of the tree?
-        /* Binary search to find the next page for the start key. */
-        ret = __cursor_range_selectivity_do_traversal_step(&kstart, session, collator, start,
-          page_start, parent_pindex_start, pindex_start, current_start, &descent_start,
-          &indx_start);
-        if (ret == WT_RESTART) {
-            goto restart;
-        }
-        WT_ERR(ret);
+            /* Binary search to find the next page for the stop key. */
+            ret = __cursor_range_selectivity_do_traversal_step(&kstop, session, collator, start,
+            page_start, parent_pindex_start, pindex_start, current_start, &descent_stop, &indx_stop);
+            if (ret == WT_RESTART) {
+                goto restart;
+            }
+            WT_ERR(ret);
 
-        /* Binary search to find the next page for the stop key. */
-        ret = __cursor_range_selectivity_do_traversal_step(&kstop, session, collator, start,
-          page_stop, parent_pindex_stop, pindex_stop, current_stop, &descent_stop, &indx_stop);
-        if (ret == WT_RESTART) {
-            goto restart;
-        }
-        WT_ERR(ret);
+            /**
+             * If there are 'n' children under the current node and the next node to visit for key 'k'
+             * is at child 'i', then we say that at least (i-1)/n of the entries under the current node
+             * are <=k. The next iteration of traversal will determine what fraction of the 'i'th
+             * child's entries are <=k.
+             *
+             * This estimation assumes that entries are equally distributed among the children of the
+             * node (i.e., each child is responsible for 1/n fraction of entries).
+             *
+             * Note that the entries are 1-indexed. So if the index for k is 2, then there are (2-1)=1
+             * children with values guaranteed to be <= k. Note also that when searching for key k among
+             * entries, we expect to see index values between 1 and entries - 1 (N = entries - 1).
+             */
+            percentile_start +=
+            ((double)(indx_start - 1) / (double)(pindex_start->entries - 1)) * selectivity_start_node;
+            percentile_stop += ((double)(indx_stop - 1) / (double)(pindex_start->entries - 1)) * selectivity_stop_node;
 
-        /**
-         * If there are 'n' children under the current node and the next node to visit for key 'k'
-         * is at child 'i', then we say that at least (i-1)/n of the entries under the current node
-         * are <=k. The next iteration of traversal will determine what fraction of the 'i'th
-         * child's entries are <=k.
-         *
-         * This estimation assumes that entries are equally distributed among the children of the
-         * node (i.e., each child is responsible for 1/n fraction of entries).
-         *
-         * Note that the entries are 1-indexed. So if the index for k is 2, then there are (2-1)=1
-         * children with values guaranteed to be <= k. Note also that when searching for key k among
-         * entries, we expect to see index values between 1 and entries - 1 (N = entries - 1).
-         */
-        percentile_start +=
-          ((double)(indx_start - 1) / (double)(pindex_start->entries - 1)) * selectivity_start_node;
-        percentile_stop += ((double)(indx_stop - 1) / (double)(pindex_stop->entries - 1)) * selectivity_stop_node;
+            selectivity_start_node *= (double)1 / (double)(pindex_start->entries - 1);
+            selectivity_stop_node *= (double)1 / (double)(pindex_start->entries - 1);
 
-        selectivity_start_node *= (double)1 / (double)(pindex_start->entries - 1);
-        selectivity_stop_node *= (double)1 / (double)(pindex_stop->entries - 1);
+            if (indx_start != indx_stop) {
+                diverged = true;
+            } else {
+                // TODO: release descent_stop?
+                // no, we don't have it yet
+            }
 
-        if (indx_start != indx_stop) {
-            diverged = true;
-        }
+            /*
+            * Swap the current page(s) for the child page(s). If the page splits while we're retrieving
+            * it, restart the search at the root.
+            */
+            read_flags = WT_READ_RESTART_OK;
+            if (F_ISSET(start, WT_CBT_READ_ONCE))
+                FLD_SET(read_flags, WT_READ_WONT_NEED);
+            
+            // Do this maybe before we continue w swapping?
+            // TODO: do we need pindex_stop?
+            if (diverged) {
+                if ((ret = __wt_page_in(session, descent_stop, read_flags)) == 0) {
+                    current_stop = descent_stop;
+                    page_stop = current_stop->page;
+                }
+            }
+            if (ret == WT_RESTART) // todo: it can be other errors
+                goto restart;
 
-        /*
-         * Swap the current page(s) for the child page(s). If the page splits while we're retrieving
-         * it, restart the search at the root.
-         */
-        read_flags = WT_READ_RESTART_OK;
-        if (F_ISSET(start, WT_CBT_READ_ONCE))
-            FLD_SET(read_flags, WT_READ_WONT_NEED);
-        if ((ret = __wt_page_swap(session, current_start, descent_start, read_flags)) == 0) {
-            current_start = descent_start;
-            if ((ret = __wt_page_swap(session, current_stop, descent_stop, read_flags)) == 0) {
-                current_stop = descent_stop;
+            if ((ret = __wt_page_swap(session, current_start, descent_start, read_flags)) == 0) {
+                current_start = descent_start;
+                
                 continue;
             }
+            if (ret == WT_RESTART)
+                goto restart;
+            return (ret);
+        } else {
+            parent_pindex_start = pindex_start;
+            page_start = current_start->page;
+
+            parent_pindex_stop = pindex_stop;
+            page_stop = current_stop->page;
+
+            /* Leaves are equidistant from the root; if 'start' has hit a leaf, 'stop' has too. */
+            if (page_start->type != WT_PAGE_ROW_INT)
+                break;
+
+            WT_INTL_INDEX_GET(session, page_start, pindex_start);
+            WT_INTL_INDEX_GET(session, page_stop, pindex_stop);
+
+            // TODO: we seem to hit this for really small trees (fit on one page).
+            // Something weird is going -- the leaf counts are not adding up for large range?
+            if (pindex_start->entries == 1 || pindex_stop->entries == 1) {
+                WT_ERR_MSG(session, WT_ERROR, "Found a page without(?) child pages. Did you forget to checkpoint?");
+            }
+
+            // TODO: Ask Wt rep: Is it better to do the traversal steps together while the traversals
+            // have not diverged? Or is there some way to open cursors that ensures we get a consistent
+            // view of the tree?
+            /* Binary search to find the next page for the start key. */
+            ret = __cursor_range_selectivity_do_traversal_step(&kstart, session, collator, start,
+            page_start, parent_pindex_start, pindex_start, current_start, &descent_start,
+            &indx_start);
+            if (ret == WT_RESTART) {
+                goto restart;
+            }
+            WT_ERR(ret);
+
+            /* Binary search to find the next page for the stop key. */
+            ret = __cursor_range_selectivity_do_traversal_step(&kstop, session, collator, start,  // todo: why start?
+            page_stop, parent_pindex_stop, pindex_stop, current_stop, &descent_stop, &indx_stop);
+            if (ret == WT_RESTART) {
+                goto restart;
+            }
+            WT_ERR(ret);
+
+            /**
+             * If there are 'n' children under the current node and the next node to visit for key 'k'
+             * is at child 'i', then we say that at least (i-1)/n of the entries under the current node
+             * are <=k. The next iteration of traversal will determine what fraction of the 'i'th
+             * child's entries are <=k.
+             *
+             * This estimation assumes that entries are equally distributed among the children of the
+             * node (i.e., each child is responsible for 1/n fraction of entries).
+             *
+             * Note that the entries are 1-indexed. So if the index for k is 2, then there are (2-1)=1
+             * children with values guaranteed to be <= k. Note also that when searching for key k among
+             * entries, we expect to see index values between 1 and entries - 1 (N = entries - 1).
+             */
+            percentile_start +=
+            ((double)(indx_start - 1) / (double)(pindex_start->entries - 1)) * selectivity_start_node;
+            percentile_stop += ((double)(indx_stop - 1) / (double)(pindex_stop->entries - 1)) * selectivity_stop_node;
+
+            selectivity_start_node *= (double)1 / (double)(pindex_start->entries - 1);
+            selectivity_stop_node *= (double)1 / (double)(pindex_stop->entries - 1);
+
+            /*
+            * Swap the current page(s) for the child page(s). If the page splits while we're retrieving
+            * it, restart the search at the root.
+            */
+            read_flags = WT_READ_RESTART_OK;
+            if (F_ISSET(start, WT_CBT_READ_ONCE))
+                FLD_SET(read_flags, WT_READ_WONT_NEED);
+            if ((ret = __wt_page_swap(session, current_start, descent_start, read_flags)) == 0) {
+                current_start = descent_start;
+                if ((ret = __wt_page_swap(session, current_stop, descent_stop, read_flags)) == 0) {
+                    current_stop = descent_stop;
+                    continue;
+                }
+            }
+            if (ret == WT_RESTART)
+                goto restart;
+            return (ret);
         }
-        if (ret == WT_RESTART)
-            goto restart;
-        return (ret);
+        
     }
 
     // We reached a leaf node.
     start_leaf_count = current_start->page->entries;
-    stop_leaf_count = current_stop->page->entries;
+    if (!diverged) {
+        stop_leaf_count = start_leaf_count;
+    } else {
+        stop_leaf_count = current_stop->page->entries;
+    }
+    
     if (start_leaf_count == 0 || stop_leaf_count == 0) {
         WT_ERR_MSG(session, WT_ERROR, "Found a leaf without entries. Did you forget to checkpoint?");
     }
@@ -2606,7 +2694,9 @@ restart:
 
 err:
     WT_TRET(__wt_page_release(session, current_start, 0));
-    WT_TRET(__wt_page_release(session, current_stop, 0));
+    if (diverged) {
+        WT_TRET(__wt_page_release(session, current_stop, 0)); // todo: only if not diverged?
+    }
     return (ret);
 }
 
