@@ -2229,8 +2229,8 @@ err:
  *      indx_ptr will be in range [0, entries - 1]
  */
 static int
-__cursor_range_selectivity_get_leaf_idx(WT_ITEM *srch_key, WT_SESSION_IMPL *session, 
-    WT_COLLATOR *collator, WT_CURSOR_BTREE *cbt, WT_REF *current, uint32_t *indx_ptr)
+__cursor_range_selectivity_get_leaf_idx(WT_ITEM *srch_key, WT_SESSION_IMPL *session,
+  WT_COLLATOR *collator, WT_CURSOR_BTREE *cbt, WT_REF *current, uint32_t *indx_ptr)
 {
     WT_DECL_RET;
 
@@ -2447,6 +2447,8 @@ __cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double
     double selectivity_start_node, selectivity_stop_node;
     bool diverged;
 
+    fprintf(stderr, "In cursor range sel: start\n");
+
     session = CUR2S(start);
     btree = S2BT(session);
     collator = btree->collator;
@@ -2488,6 +2490,9 @@ restart:
     // Traverse through the tree for both keys simulateneously, starting with a single pointer to
     // the root page. When the start and stop key traversals diverge, then we need two pointers.
     while (true) {
+        fprintf(
+          stderr, "    In cursor range sel loop with diverged: %s\n", diverged ? "true" : "false");
+
         parent_pindex_start = pindex_start;
         page_start = current_start->page;
         if (diverged) {
@@ -2499,7 +2504,7 @@ restart:
         // Edge case: that's not always true.
         if (page_start->type != WT_PAGE_ROW_INT)
             break;
-        
+
         WT_INTL_INDEX_GET(session, page_start, pindex_start);
         if (diverged) {
             WT_INTL_INDEX_GET(session, page_stop, pindex_stop);
@@ -2522,8 +2527,8 @@ restart:
 
         /* Binary search to find the next page for the start key. */
         ret = __cursor_range_selectivity_do_traversal_step(&kstart, session, collator, start,
-            page_start, parent_pindex_start, pindex_start, current_start, &descent_start,
-            &indx_start);
+          page_start, parent_pindex_start, pindex_start, current_start, &descent_start,
+          &indx_start);
         if (ret == WT_RESTART) {
             goto restart;
         }
@@ -2532,17 +2537,16 @@ restart:
         if (diverged) {
             /* Binary search to find the next page for the stop key. */
             ret = __cursor_range_selectivity_do_traversal_step(&kstop, session, collator, stop,
-                page_stop, parent_pindex_stop, pindex_stop, current_stop, &descent_stop, 
-                &indx_stop);
+              page_stop, parent_pindex_stop, pindex_stop, current_stop, &descent_stop, &indx_stop);
             if (ret == WT_RESTART) {
                 goto restart;
             }
             WT_ERR(ret);
 
             /*
-            * Swap the current page(s) for the child page(s). If the page splits while we're
-            * retrieving it, restart the search at the root.
-            */
+             * Swap the current page(s) for the child page(s). If the page splits while we're
+             * retrieving it, restart the search at the root.
+             */
             read_flags = WT_READ_RESTART_OK;
             if (F_ISSET(start, WT_CBT_READ_ONCE))
                 FLD_SET(read_flags, WT_READ_WONT_NEED);
@@ -2558,9 +2562,9 @@ restart:
         } else {
             // We have not diverged yet. Binary search to find the next page for the stop key using
             // the start pointers.
-            ret = __cursor_range_selectivity_do_traversal_step(&kstop, session, collator, start,
-                page_start, parent_pindex_start, pindex_start, current_start, &descent_stop,
-                &indx_stop);
+            ret = __cursor_range_selectivity_do_traversal_step(&kstop, session, collator, stop,
+              page_start, parent_pindex_start, pindex_start, current_start, &descent_stop,
+              &indx_stop);
             if (ret == WT_RESTART) {
                 goto restart;
             }
@@ -2570,13 +2574,18 @@ restart:
                 diverged = true;
             }
 
+            fprintf(stderr, "    We had not diverged yet and now diverged: %s\n",
+              diverged ? "true" : "false");
+
             read_flags = WT_READ_RESTART_OK;
             if (F_ISSET(start, WT_CBT_READ_ONCE))
                 FLD_SET(read_flags, WT_READ_WONT_NEED);
-            
-            // If we've newly diverged, we need to acquire a hazard pointer for the stop page. 
+
+            // If we've newly diverged, we need to acquire a hazard pointer for the stop page.
             // Otherwise, we still only need to maintain one pointer (current_start).
+            // todo: this feels like the issue
             if (diverged) {
+                // todo: testing if this is the issue or the leaf handling
                 if ((ret = __wt_page_in(session, descent_stop, read_flags)) == 0) {
                     current_stop = descent_stop;
                 }
@@ -2607,13 +2616,15 @@ restart:
          * entries, we expect to see index values between 1 and entries - 1 (N = entries - 1).
          */
         percentile_start +=
-            ((double)(indx_start - 1) / (double)start_child_count) * selectivity_start_node;
-        percentile_stop += 
-            ((double)(indx_stop - 1) / (double)stop_child_count) * selectivity_stop_node;
+          ((double)(indx_start - 1) / (double)start_child_count) * selectivity_start_node;
+        percentile_stop +=
+          ((double)(indx_stop - 1) / (double)stop_child_count) * selectivity_stop_node;
 
         selectivity_start_node *= (double)1 / (double)start_child_count;
         selectivity_stop_node *= (double)1 / (double)stop_child_count;
     }
+
+    fprintf(stderr, "    Reached a leaf with: %s\n", diverged ? "true" : "false");
 
     // We reached a leaf node.
     start_child_count = current_start->page->entries;
@@ -2622,21 +2633,32 @@ restart:
     } else {
         stop_child_count = start_child_count;
     }
-    
+
     if (start_child_count == 0 || stop_child_count == 0) {
-        WT_ERR_MSG(session, WT_ERROR, "Found a leaf without entries. Did you forget to checkpoint?");
+        WT_ERR_MSG(
+          session, WT_ERROR, "Found a leaf without entries. Did you forget to checkpoint?");
     }
 
-    ret = __cursor_range_selectivity_get_leaf_idx(&kstart, session, collator, start, current_start, &indx_start);
+    ret = __cursor_range_selectivity_get_leaf_idx(
+      &kstart, session, collator, start, current_start, &indx_start);
     if (ret == WT_RESTART) {
         goto restart;
     }
     WT_ERR(ret);
 
+    // oops, cursor_range_sel sets current_start to null?!
+    // Clear current now that we have moved the reference into the btree cursor, so that cleanup
+    // never releases twice.
+    // or no, the pointer (copied) is set to null
     if (diverged) {
-        ret = __cursor_range_selectivity_get_leaf_idx(&kstop, session, collator, stop, current_stop, &indx_stop);
+        ret = __cursor_range_selectivity_get_leaf_idx(
+          &kstop, session, collator, stop, current_stop, &indx_stop);
+        current_stop = NULL;
     } else {
-        ret = __cursor_range_selectivity_get_leaf_idx(&kstop, session, collator, start, current_start, &indx_stop);
+        // todo: should this be stop?
+        ret = __cursor_range_selectivity_get_leaf_idx(
+          &kstop, session, collator, stop, current_start, &indx_stop);
+        current_start = NULL; // todo: but then when release current_start?
     }
     if (ret == WT_RESTART) {
         goto restart;
@@ -2645,9 +2667,10 @@ restart:
 
     // If indx_start is the 0th index, it means the key is before any key found on the page or it
     // is the first key on the page. In that case, we should add nothing to the percentile
-    percentile_start += ((double)(indx_start)/start_child_count) * selectivity_start_node;
-    percentile_stop += ((double)(indx_stop)/stop_child_count) * selectivity_stop_node;
+    percentile_start += ((double)(indx_start) / start_child_count) * selectivity_start_node;
+    percentile_stop += ((double)(indx_stop) / stop_child_count) * selectivity_stop_node;
     *selectivityp = percentile_stop - percentile_start;
+    *selectivityp = 1;
 
 err:
     WT_TRET(__wt_page_release(session, current_start, 0));
