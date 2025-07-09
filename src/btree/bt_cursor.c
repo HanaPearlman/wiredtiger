@@ -2447,8 +2447,6 @@ __cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double
     double selectivity_start_node, selectivity_stop_node;
     bool diverged;
 
-    fprintf(stderr, "In cursor range sel: start\n");
-
     session = CUR2S(start);
     btree = S2BT(session);
     collator = btree->collator;
@@ -2472,9 +2470,7 @@ restart:
          * Discard the currently held page and restart the search from the root.
          */
         WT_RET(__wt_page_release(session, current_start, 0));
-        if (current_stop) {
-            WT_RET(__wt_page_release(session, current_stop, 0));
-        }
+        WT_RET(__wt_page_release(session, current_stop, 0));
     }
 
     current_start = &btree->root;
@@ -2490,9 +2486,6 @@ restart:
     // Traverse through the tree for both keys simulateneously, starting with a single pointer to
     // the root page. When the start and stop key traversals diverge, then we need two pointers.
     while (true) {
-        fprintf(
-          stderr, "    In cursor range sel loop with diverged: %s\n", diverged ? "true" : "false");
-
         parent_pindex_start = pindex_start;
         page_start = current_start->page;
         if (diverged) {
@@ -2574,18 +2567,13 @@ restart:
                 diverged = true;
             }
 
-            fprintf(stderr, "    We had not diverged yet and now diverged: %s\n",
-              diverged ? "true" : "false");
-
             read_flags = WT_READ_RESTART_OK;
             if (F_ISSET(start, WT_CBT_READ_ONCE))
                 FLD_SET(read_flags, WT_READ_WONT_NEED);
 
             // If we've newly diverged, we need to acquire a hazard pointer for the stop page.
             // Otherwise, we still only need to maintain one pointer (current_start).
-            // todo: this feels like the issue
             if (diverged) {
-                // todo: testing if this is the issue or the leaf handling
                 if ((ret = __wt_page_in(session, descent_stop, read_flags)) == 0) {
                     current_stop = descent_stop;
                 }
@@ -2624,8 +2612,6 @@ restart:
         selectivity_stop_node *= (double)1 / (double)stop_child_count;
     }
 
-    fprintf(stderr, "    Reached a leaf with: %s\n", diverged ? "true" : "false");
-
     // We reached a leaf node.
     start_child_count = current_start->page->entries;
     if (diverged) {
@@ -2646,19 +2632,16 @@ restart:
     }
     WT_ERR(ret);
 
-    // oops, cursor_range_sel sets current_start to null?!
-    // Clear current now that we have moved the reference into the btree cursor, so that cleanup
-    // never releases twice.
-    // or no, the pointer (copied) is set to null
+    // At this point, we need to clear out the current pointers which have been moved
+    // into the btree cursor, so that cleanup never releases twice.
     if (diverged) {
         ret = __cursor_range_selectivity_get_leaf_idx(
           &kstop, session, collator, stop, current_stop, &indx_stop);
         current_stop = NULL;
     } else {
-        // todo: should this be stop?
         ret = __cursor_range_selectivity_get_leaf_idx(
           &kstop, session, collator, stop, current_start, &indx_stop);
-        current_start = NULL; // todo: but then when release current_start?
+        current_start = NULL;
     }
     if (ret == WT_RESTART) {
         goto restart;
@@ -2670,13 +2653,11 @@ restart:
     percentile_start += ((double)(indx_start) / start_child_count) * selectivity_start_node;
     percentile_stop += ((double)(indx_stop) / stop_child_count) * selectivity_stop_node;
     *selectivityp = percentile_stop - percentile_start;
-    *selectivityp = 1;
 
 err:
     WT_TRET(__wt_page_release(session, current_start, 0));
-    if (current_stop) {
-        WT_TRET(__wt_page_release(session, current_stop, 0));
-    }
+    WT_TRET(__wt_page_release(session, current_stop, 0));
+
     return (ret);
 }
 
