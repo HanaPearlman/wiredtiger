@@ -2443,7 +2443,7 @@ __cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double
     WT_PAGE *page_start, *page_stop;
     WT_PAGE_INDEX *parent_pindex_start, *pindex_start, *parent_pindex_stop, *pindex_stop;
     WT_REF *current_start, *descent_start, *current_stop, *descent_stop;
-    uint32_t indx_start, indx_stop, read_flags, start_leaf_count, stop_leaf_count;
+    uint32_t indx_start, indx_stop, read_flags, start_child_count, stop_child_count;
     double percentile_start, percentile_stop;
     double selectivity_start_node, selectivity_stop_node;
     bool diverged;
@@ -2486,19 +2486,38 @@ restart:
     pindex_start = pindex_stop = NULL;
 
     while (true) {
+        parent_pindex_start = pindex_start;
+        page_start = current_start->page;
+
+        if (diverged) {
+            parent_pindex_stop = pindex_stop;
+            page_stop = current_stop->page;
+        }
+
+        /* Leaves are equidistant from the root; if 'start' has hit a leaf, 'stop' has too. */
+        if (page_start->type != WT_PAGE_ROW_INT)
+            break;
+        
+        WT_INTL_INDEX_GET(session, page_start, pindex_start);
+        if (diverged) {
+            WT_INTL_INDEX_GET(session, page_stop, pindex_stop);
+        }
+
+        start_child_count = pindex_start->entries - 1;
+        if (start_child_count == 0) {
+            start_child_count = 1;
+        }
+
         if (!diverged) {
-            parent_pindex_start = pindex_start;
-            page_start = current_start->page;
-
-            if (page_start->type != WT_PAGE_ROW_INT)
-                break;
-
-            WT_INTL_INDEX_GET(session, page_start, pindex_start);
-
-            if (pindex_start->entries == 1) {
-                WT_ERR_MSG(session, WT_ERROR, "Found a page without(?) child pages. Did you forget to checkpoint?");
+            stop_child_count = start_child_count;
+        } else {
+            stop_child_count = pindex_stop->entries - 1;
+            if (stop_child_count == 0) {
+                stop_child_count = 1;
             }
+        }
 
+        if (!diverged) {
             /* Binary search to find the next page for the start key. */
             ret = __cursor_range_selectivity_do_traversal_step(&kstart, session, collator, start,
             page_start, parent_pindex_start, pindex_start, current_start, &descent_start,
@@ -2516,31 +2535,8 @@ restart:
             }
             WT_ERR(ret);
 
-            /**
-             * If there are 'n' children under the current node and the next node to visit for key 'k'
-             * is at child 'i', then we say that at least (i-1)/n of the entries under the current node
-             * are <=k. The next iteration of traversal will determine what fraction of the 'i'th
-             * child's entries are <=k.
-             *
-             * This estimation assumes that entries are equally distributed among the children of the
-             * node (i.e., each child is responsible for 1/n fraction of entries).
-             *
-             * Note that the entries are 1-indexed. So if the index for k is 2, then there are (2-1)=1
-             * children with values guaranteed to be <= k. Note also that when searching for key k among
-             * entries, we expect to see index values between 1 and entries - 1 (N = entries - 1).
-             */
-            percentile_start +=
-            ((double)(indx_start - 1) / (double)(pindex_start->entries - 1)) * selectivity_start_node;
-            percentile_stop += ((double)(indx_stop - 1) / (double)(pindex_start->entries - 1)) * selectivity_stop_node;
-
-            selectivity_start_node *= (double)1 / (double)(pindex_start->entries - 1);
-            selectivity_stop_node *= (double)1 / (double)(pindex_start->entries - 1);
-
             if (indx_start != indx_stop) {
                 diverged = true;
-            } else {
-                // TODO: release descent_stop?
-                // no, we don't have it yet
             }
 
             /*
@@ -2552,7 +2548,6 @@ restart:
                 FLD_SET(read_flags, WT_READ_WONT_NEED);
             
             // Do this maybe before we continue w swapping?
-            // TODO: do we need pindex_stop?
             if (diverged) {
                 if ((ret = __wt_page_in(session, descent_stop, read_flags)) == 0) {
                     current_stop = descent_stop;
@@ -2564,35 +2559,12 @@ restart:
 
             if ((ret = __wt_page_swap(session, current_start, descent_start, read_flags)) == 0) {
                 current_start = descent_start;
-                
-                continue;
             }
             if (ret == WT_RESTART)
                 goto restart;
-            return (ret);
+            if (ret != 0)
+                return (ret);
         } else {
-            parent_pindex_start = pindex_start;
-            page_start = current_start->page;
-
-            parent_pindex_stop = pindex_stop;
-            page_stop = current_stop->page;
-
-            /* Leaves are equidistant from the root; if 'start' has hit a leaf, 'stop' has too. */
-            if (page_start->type != WT_PAGE_ROW_INT)
-                break;
-
-            WT_INTL_INDEX_GET(session, page_start, pindex_start);
-            WT_INTL_INDEX_GET(session, page_stop, pindex_stop);
-
-            // TODO: we seem to hit this for really small trees (fit on one page).
-            // Something weird is going -- the leaf counts are not adding up for large range?
-            if (pindex_start->entries == 1 || pindex_stop->entries == 1) {
-                WT_ERR_MSG(session, WT_ERROR, "Found a page without(?) child pages. Did you forget to checkpoint?");
-            }
-
-            // TODO: Ask Wt rep: Is it better to do the traversal steps together while the traversals
-            // have not diverged? Or is there some way to open cursors that ensures we get a consistent
-            // view of the tree?
             /* Binary search to find the next page for the start key. */
             ret = __cursor_range_selectivity_do_traversal_step(&kstart, session, collator, start,
             page_start, parent_pindex_start, pindex_start, current_start, &descent_start,
@@ -2610,26 +2582,6 @@ restart:
             }
             WT_ERR(ret);
 
-            /**
-             * If there are 'n' children under the current node and the next node to visit for key 'k'
-             * is at child 'i', then we say that at least (i-1)/n of the entries under the current node
-             * are <=k. The next iteration of traversal will determine what fraction of the 'i'th
-             * child's entries are <=k.
-             *
-             * This estimation assumes that entries are equally distributed among the children of the
-             * node (i.e., each child is responsible for 1/n fraction of entries).
-             *
-             * Note that the entries are 1-indexed. So if the index for k is 2, then there are (2-1)=1
-             * children with values guaranteed to be <= k. Note also that when searching for key k among
-             * entries, we expect to see index values between 1 and entries - 1 (N = entries - 1).
-             */
-            percentile_start +=
-            ((double)(indx_start - 1) / (double)(pindex_start->entries - 1)) * selectivity_start_node;
-            percentile_stop += ((double)(indx_stop - 1) / (double)(pindex_stop->entries - 1)) * selectivity_stop_node;
-
-            selectivity_start_node *= (double)1 / (double)(pindex_start->entries - 1);
-            selectivity_stop_node *= (double)1 / (double)(pindex_stop->entries - 1);
-
             /*
             * Swap the current page(s) for the child page(s). If the page splits while we're retrieving
             * it, restart the search at the root.
@@ -2641,25 +2593,44 @@ restart:
                 current_start = descent_start;
                 if ((ret = __wt_page_swap(session, current_stop, descent_stop, read_flags)) == 0) {
                     current_stop = descent_stop;
-                    continue;
                 }
             }
             if (ret == WT_RESTART)
                 goto restart;
-            return (ret);
+            if (ret != 0)
+                return (ret);
         }
-        
+
+        /**
+         * If there are 'n' children under the current node and the next node to visit for key 'k'
+         * is at child 'i', then we say that at least (i-1)/n of the entries under the current node
+         * are <=k. The next iteration of traversal will determine what fraction of the 'i'th
+         * child's entries are <=k.
+         *
+         * This estimation assumes that entries are equally distributed among the children of the
+         * node (i.e., each child is responsible for 1/n fraction of entries).
+         *
+         * Note that the entries are 1-indexed. So if the index for k is 2, then there are (2-1)=1
+         * children with values guaranteed to be <= k. Note also that when searching for key k among
+         * entries, we expect to see index values between 1 and entries - 1 (N = entries - 1).
+         */
+        percentile_start +=
+        ((double)(indx_start - 1) / (double)start_child_count) * selectivity_start_node;
+        percentile_stop += ((double)(indx_stop - 1) / (double)stop_child_count) * selectivity_stop_node;
+
+        selectivity_start_node *= (double)1 / (double)start_child_count;
+        selectivity_stop_node *= (double)1 / (double)stop_child_count;
     }
 
     // We reached a leaf node.
-    start_leaf_count = current_start->page->entries;
+    start_child_count = current_start->page->entries;
     if (!diverged) {
-        stop_leaf_count = start_leaf_count;
+        stop_child_count = start_child_count;
     } else {
-        stop_leaf_count = current_stop->page->entries;
+        stop_child_count = current_stop->page->entries;
     }
     
-    if (start_leaf_count == 0 || stop_leaf_count == 0) {
+    if (start_child_count == 0 || stop_child_count == 0) {
         WT_ERR_MSG(session, WT_ERROR, "Found a leaf without entries. Did you forget to checkpoint?");
     }
 
@@ -2674,7 +2645,6 @@ restart:
     } else {
         ret = __cursor_range_selectivity_get_leaf_idx(&kstop, session, collator, stop, page_stop, current_stop, &indx_stop);
     }
-
     if (ret == WT_RESTART) {
         goto restart;
     }
@@ -2682,12 +2652,11 @@ restart:
 
     // If indx_start is the 0th index, it means the key is before any key found on the page or it
     // is the first key on the page. In that case, we should add nothing to the percentile
-    // TODO: are there an off-by-one issues here?
-    percentile_start += ((double)(indx_start)/start_leaf_count) * selectivity_start_node;
+    percentile_start += ((double)(indx_start)/start_child_count) * selectivity_start_node;
     if (!diverged) {
-        percentile_stop += ((double)(indx_stop)/start_leaf_count) * selectivity_start_node;
+        percentile_stop += ((double)(indx_stop)/start_child_count) * selectivity_start_node;
     } else {
-        percentile_stop += ((double)(indx_stop)/stop_leaf_count) * selectivity_stop_node;
+        percentile_stop += ((double)(indx_stop)/stop_child_count) * selectivity_stop_node;
     }
 
     *selectivityp = percentile_stop - percentile_start;
