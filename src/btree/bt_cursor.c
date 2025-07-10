@@ -2245,14 +2245,7 @@ __cursor_range_selectivity_get_leaf_idx(WT_ITEM *srch_key, WT_SESSION_IMPL *sess
      * Binary search of a leaf page. This is largely copied from row_srch.c
      */
     page = current->page;
-    cbt->ref = current;
     item = cbt->tmp;
-
-    /*
-     * Clear current now that we have moved the reference into the btree cursor, so that cleanup
-     * never releases twice.
-     */
-    current = NULL;
 
     /*
      * Binary search of an leaf page. There are three versions (keys with no application-specified
@@ -2632,16 +2625,12 @@ restart:
     }
     WT_ERR(ret);
 
-    // At this point, we need to clear out the current pointers which have been moved
-    // into the btree cursor, so that cleanup never releases twice.
     if (diverged) {
         ret = __cursor_range_selectivity_get_leaf_idx(
           &kstop, session, collator, stop, current_stop, &indx_stop);
-        current_stop = NULL;
     } else {
         ret = __cursor_range_selectivity_get_leaf_idx(
           &kstop, session, collator, stop, current_start, &indx_stop);
-        current_start = NULL;
     }
     if (ret == WT_RESTART) {
         goto restart;
