@@ -2230,7 +2230,7 @@ err:
  */
 static int
 __cursor_range_selectivity_get_leaf_idx(WT_ITEM *srch_key, WT_SESSION_IMPL *session,
-  WT_COLLATOR *collator, WT_CURSOR_BTREE *cbt, WT_PAGE *page, WT_REF *current, uint32_t *indx_ptr)
+  WT_COLLATOR *collator, WT_CURSOR_BTREE *cbt, WT_REF *current, uint32_t *indx_ptr)
 {
     WT_DECL_RET;
 
@@ -2239,6 +2239,7 @@ __cursor_range_selectivity_get_leaf_idx(WT_ITEM *srch_key, WT_SESSION_IMPL *sess
     uint32_t base, limit, indx;
     int cmp;
     WT_ROW *rip;
+    WT_PAGE *page;
 
     /*
      * Binary search of a leaf page. This is largely copied from row_srch.c
@@ -2441,7 +2442,7 @@ __cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double
     WT_PAGE *page_start, *page_stop;
     WT_PAGE_INDEX *parent_pindex_start, *pindex_start, *parent_pindex_stop, *pindex_stop;
     WT_REF *current_start, *descent_start, *current_stop, *descent_stop;
-    uint32_t indx_start, indx_stop, read_flags, start_leaf_count, stop_leaf_count;
+    uint32_t indx_start, indx_stop, read_flags, start_child_count, stop_child_count;
     double percentile_start, percentile_stop;
     double selectivity_start_node, selectivity_stop_node;
     bool diverged;
@@ -2460,10 +2461,6 @@ __cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double
     WT_RET(__wt_cursor_get_raw_key((WT_CURSOR *)stop, &kstop));
 
     // TODO: could look at  btree->maximum_depth if that's useful to telling how deep to traverse.
-    /**
-     * TODO: there is wasted work in this function; we don't need to do everything twice until the
-     * traversals diverge.
-     */
     __cursor_pos_clear(start);
     __cursor_pos_clear(stop);
 
@@ -2476,38 +2473,51 @@ restart:
         WT_RET(__wt_page_release(session, current_stop, 0));
     }
 
-    /**
-     * Search the internal pages of the tree simultaneously for the start and stop keys.
-     */
-    current_start = current_stop = &btree->root;
+    current_start = &btree->root;
+    diverged = false;
+    pindex_start = pindex_stop = NULL;
+
+    // Accumulate the percentile for the start and stop keys as we traverse the tree. At the end,
+    // these will be subtracted to get the selectivity of the range. Also, keep track of the
+    // fraction of data under the page we are currently at for both traversals.
     percentile_start = percentile_stop = 0;
     selectivity_start_node = selectivity_stop_node = 1;
-    pindex_start = pindex_stop = NULL;
-    diverged = false;
 
+    // Traverse through the tree for both keys simulateneously, starting with a single pointer to
+    // the root page. When the start and stop key traversals diverge, then we need two pointers.
     while (true) {
         parent_pindex_start = pindex_start;
         page_start = current_start->page;
+        if (diverged) {
+            parent_pindex_stop = pindex_stop;
+            page_stop = current_stop->page;
+        }
 
-        parent_pindex_stop = pindex_stop;
-        page_stop = current_stop->page;
-
-        /* Leaves are equidistant from the root; if 'start' has hit a leaf, 'stop' has too. */
+        // Leaves are equidistant from the root; if 'start' has hit a leaf, 'stop' has too. TODO:
+        // Edge case: that's not always true.
         if (page_start->type != WT_PAGE_ROW_INT)
             break;
 
         WT_INTL_INDEX_GET(session, page_start, pindex_start);
-        WT_INTL_INDEX_GET(session, page_stop, pindex_stop);
-
-        // TODO: we seem to hit this for really small trees (fit on one page).
-        // Something weird is going -- the leaf counts are not adding up for large range?
-        if (pindex_start->entries == 1 || pindex_stop->entries == 1) {
-            WT_ERR_MSG(session, WT_ERROR, "Found a page without(?) child pages. Did you forget to checkpoint?");
+        if (diverged) {
+            WT_INTL_INDEX_GET(session, page_stop, pindex_stop);
         }
 
-        // TODO: Ask Wt rep: Is it better to do the traversal steps together while the traversals
-        // have not diverged? Or is there some way to open cursors that ensures we get a consistent
-        // view of the tree?
+        // Most of the time at internal pages, the zero-th key is a placeholder and should not be
+        // included in the child count. However, very small trees sometimes have only child.
+        start_child_count = pindex_start->entries - 1;
+        if (diverged) {
+            stop_child_count = pindex_stop->entries - 1;
+        } else {
+            stop_child_count = start_child_count;
+        }
+        if (start_child_count == 0) {
+            start_child_count = 1;
+        }
+        if (stop_child_count == 0) {
+            stop_child_count = 1;
+        }
+
         /* Binary search to find the next page for the start key. */
         ret = __cursor_range_selectivity_do_traversal_step(&kstart, session, collator, start,
           page_start, parent_pindex_start, pindex_start, current_start, &descent_start,
@@ -2517,13 +2527,68 @@ restart:
         }
         WT_ERR(ret);
 
-        /* Binary search to find the next page for the stop key. */
-        ret = __cursor_range_selectivity_do_traversal_step(&kstop, session, collator, start,
-          page_stop, parent_pindex_stop, pindex_stop, current_stop, &descent_stop, &indx_stop);
-        if (ret == WT_RESTART) {
-            goto restart;
+        if (diverged) {
+            /* Binary search to find the next page for the stop key. */
+            ret = __cursor_range_selectivity_do_traversal_step(&kstop, session, collator, stop,
+              page_stop, parent_pindex_stop, pindex_stop, current_stop, &descent_stop, &indx_stop);
+            if (ret == WT_RESTART) {
+                goto restart;
+            }
+            WT_ERR(ret);
+
+            /*
+             * Swap the current page(s) for the child page(s). If the page splits while we're
+             * retrieving it, restart the search at the root.
+             */
+            read_flags = WT_READ_RESTART_OK;
+            if (F_ISSET(start, WT_CBT_READ_ONCE))
+                FLD_SET(read_flags, WT_READ_WONT_NEED);
+            if ((ret = __wt_page_swap(session, current_start, descent_start, read_flags)) == 0) {
+                current_start = descent_start;
+                if ((ret = __wt_page_swap(session, current_stop, descent_stop, read_flags)) == 0) {
+                    current_stop = descent_stop;
+                }
+            }
+            if (ret == WT_RESTART)
+                goto restart;
+            WT_ERR(ret);
+        } else {
+            // We have not diverged yet. Binary search to find the next page for the stop key using
+            // the start pointers.
+            ret = __cursor_range_selectivity_do_traversal_step(&kstop, session, collator, stop,
+              page_start, parent_pindex_start, pindex_start, current_start, &descent_stop,
+              &indx_stop);
+            if (ret == WT_RESTART) {
+                goto restart;
+            }
+            WT_ERR(ret);
+
+            if (indx_start != indx_stop) {
+                diverged = true;
+            }
+
+            read_flags = WT_READ_RESTART_OK;
+            if (F_ISSET(start, WT_CBT_READ_ONCE))
+                FLD_SET(read_flags, WT_READ_WONT_NEED);
+
+            // If we've newly diverged, we need to acquire a hazard pointer for the stop page.
+            // Otherwise, we still only need to maintain one pointer (current_start).
+            if (diverged) {
+                if ((ret = __wt_page_in(session, descent_stop, read_flags)) == 0) {
+                    current_stop = descent_stop;
+                }
+            }
+            if (ret == WT_RESTART)
+                goto restart;
+            WT_ERR(ret);
+
+            if ((ret = __wt_page_swap(session, current_start, descent_start, read_flags)) == 0) {
+                current_start = descent_start;
+            }
+            if (ret == WT_RESTART)
+                goto restart;
+            WT_ERR(ret);
         }
-        WT_ERR(ret);
 
         /**
          * If there are 'n' children under the current node and the next node to visit for key 'k'
@@ -2539,54 +2604,45 @@ restart:
          * entries, we expect to see index values between 1 and entries - 1 (N = entries - 1).
          */
         percentile_start +=
-          ((double)(indx_start - 1) / (double)(pindex_start->entries - 1)) * selectivity_start_node;
-        percentile_stop += ((double)(indx_stop - 1) / (double)(pindex_stop->entries - 1)) * selectivity_stop_node;
+          ((double)(indx_start - 1) / (double)start_child_count) * selectivity_start_node;
+        percentile_stop +=
+          ((double)(indx_stop - 1) / (double)stop_child_count) * selectivity_stop_node;
 
-        selectivity_start_node *= (double)1 / (double)(pindex_start->entries - 1);
-        selectivity_stop_node *= (double)1 / (double)(pindex_stop->entries - 1);
-
-        if (indx_start != indx_stop) {
-            diverged = true;
-        }
-
-        /*
-         * Swap the current page(s) for the child page(s). If the page splits while we're retrieving
-         * it, restart the search at the root.
-         */
-        read_flags = WT_READ_RESTART_OK;
-        if (F_ISSET(start, WT_CBT_READ_ONCE))
-            FLD_SET(read_flags, WT_READ_WONT_NEED);
-        if ((ret = __wt_page_swap(session, current_start, descent_start, read_flags)) == 0) {
-            current_start = descent_start;
-            if ((ret = __wt_page_swap(session, current_stop, descent_stop, read_flags)) == 0) {
-                current_stop = descent_stop;
-                continue;
-            }
-        }
-        if (ret == WT_RESTART)
-            goto restart;
-        return (ret);
+        selectivity_start_node *= (double)1 / (double)start_child_count;
+        selectivity_stop_node *= (double)1 / (double)stop_child_count;
     }
 
     // We reached a leaf node.
-    start_leaf_count = current_start->page->entries;
-    stop_leaf_count = current_stop->page->entries;
-    if (start_leaf_count == 0 || stop_leaf_count == 0) {
-        WT_ERR_MSG(session, WT_ERROR, "Found a leaf without entries. Did you forget to checkpoint?");
+    start_child_count = current_start->page->entries;
+    if (diverged) {
+        stop_child_count = current_stop->page->entries;
+    } else {
+        stop_child_count = start_child_count;
     }
 
-    ret = __cursor_range_selectivity_get_leaf_idx(&kstart, session, collator, start, page_start, current_start, &indx_start);
+    if (start_child_count == 0 || stop_child_count == 0) {
+        WT_ERR_MSG(
+          session, WT_ERROR, "Found a leaf without entries. Did you forget to checkpoint?");
+    }
+
+    ret = __cursor_range_selectivity_get_leaf_idx(
+      &kstart, session, collator, start, current_start, &indx_start);
     if (ret == WT_RESTART) {
         goto restart;
     }
     WT_ERR(ret);
 
-    if (!diverged) {
-        ret = __cursor_range_selectivity_get_leaf_idx(&kstop, session, collator, start, page_start, current_start, &indx_stop);
+    // At this point, we need to clear out the current pointers which have been moved
+    // into the btree cursor, so that cleanup never releases twice.
+    if (diverged) {
+        ret = __cursor_range_selectivity_get_leaf_idx(
+          &kstop, session, collator, stop, current_stop, &indx_stop);
+        current_stop = NULL;
     } else {
-        ret = __cursor_range_selectivity_get_leaf_idx(&kstop, session, collator, stop, page_stop, current_stop, &indx_stop);
+        ret = __cursor_range_selectivity_get_leaf_idx(
+          &kstop, session, collator, stop, current_start, &indx_stop);
+        current_start = NULL;
     }
-
     if (ret == WT_RESTART) {
         goto restart;
     }
@@ -2594,19 +2650,14 @@ restart:
 
     // If indx_start is the 0th index, it means the key is before any key found on the page or it
     // is the first key on the page. In that case, we should add nothing to the percentile
-    // TODO: are there an off-by-one issues here?
-    percentile_start += ((double)(indx_start)/start_leaf_count) * selectivity_start_node;
-    if (!diverged) {
-        percentile_stop += ((double)(indx_stop)/start_leaf_count) * selectivity_start_node;
-    } else {
-        percentile_stop += ((double)(indx_stop)/stop_leaf_count) * selectivity_stop_node;
-    }
-
+    percentile_start += ((double)(indx_start) / start_child_count) * selectivity_start_node;
+    percentile_stop += ((double)(indx_stop) / stop_child_count) * selectivity_stop_node;
     *selectivityp = percentile_stop - percentile_start;
 
 err:
     WT_TRET(__wt_page_release(session, current_start, 0));
     WT_TRET(__wt_page_release(session, current_stop, 0));
+
     return (ret);
 }
 
