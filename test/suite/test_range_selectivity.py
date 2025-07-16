@@ -56,13 +56,13 @@ class test_range_selectivity(wttest.WiredTigerTestCase):
 
         self.session.checkpoint()
 
-        # Search for range [12,000 , 13,000). True card is 999
+        # Search for range [10,000 , 13,000). True card is 3k
         cstart = self.session.open_cursor(uri, None, None)
-        cstart.set_key(ds.key(12000))
+        cstart.set_key(ds.key(10000))
         cstop = self.session.open_cursor(uri, None, None)
         cstop.set_key(ds.key(13000))
         sel = self.session.range_selectivity(cstart, cstop)
-        print("Sel for 1k range is: " + str(sel)) # Get: .11, .09
+        print("Sel for 3k range is: " + str(sel))
 
 
 

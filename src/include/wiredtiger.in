@@ -1452,13 +1452,16 @@ struct __wt_session {
 	 * @param stop optional cursor marking the last record of the range; if <code>NULL</code>,
 	 * the range continues to the end of the object
      * @configempty{WT_SESSION.range_selectivity, see dist/api_data.py}
+     * @param baseCard the base cardinality
 	 * @param selectivityp the returned selectivity
 	 * @errors
 	 */
 	int __F(range_selectivity)(WT_SESSION *session,
 	    WT_CURSOR *start,
 	    WT_CURSOR *stop,
-	    const char *config, double *selectivityp);
+	    const char *config, 
+        double baseCard, 
+        double *selectivityp);
 
     /*!
      * Reset the session handle.
