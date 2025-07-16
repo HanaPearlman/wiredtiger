@@ -2636,10 +2636,15 @@ restart:
     WT_ERR(ret);
 
     if (!diverged) {
-        // Optimization for when the two traversals end on the same leaf TODO
+        // Optimization for when the two traversals end on the same leaf. Rather than relying on
+        // assumptions about data distribution, we can directly return the selectivity as the
+        // number of keys between the stop and start key over the total number of keys.
         *selectivityp =  ((double)(indx_stop) - (double)indx_start) / baseCard;
     } else if (adjacent_traversal) {
-        // Optimization for when the two traversals end on adjacent leaves TODO
+        // Optimization for when the two traversals end on adjacent leaves. Similar to the case
+        // above, but here the number of keys between the stop and start keys is the sum of:
+        // - #keys after the start key on the start key's page (start_child_count - indx_start)
+        // - #keys before the stop key on the stop key's page (indx_stop)
         *selectivityp =  ((double)(indx_stop) + (double)(start_child_count - indx_start)) / baseCard;
     } else {    
         // Base case: divergence by at least one leaf.
