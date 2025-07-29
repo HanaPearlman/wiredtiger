@@ -1345,49 +1345,9 @@ __session_range_cursor(
   WT_SESSION_IMPL *session, WT_CURSOR *start, WT_CURSOR *stop, double baseCard, double *selectivity)
 {
     WT_DECL_RET;
-    int cmp;
     bool local_start, local_stop;
 
     local_start = local_stop = false;
-
-    /*
-     * If both cursors set, check they're correctly ordered with respect to each other. We have to
-     * test this before any search, the search can change the initial cursor position.
-     *
-     * Rather happily, the compare routine will also confirm the cursors reference the same object
-     * and the keys are set.
-     *
-     * The test for a NULL start comparison function isn't necessary (we checked it above), but it
-     * quiets clang static analysis complaints.
-     */
-    if (start != NULL && stop != NULL && start->compare != NULL) {
-        WT_ERR(start->compare(start, stop, &cmp));
-        if (cmp > 0) {
-            *selectivity = 0;
-            WT_ERR_MSG(
-              session, EINVAL, "the start cursor position is after the stop cursor position");
-        }
-    }
-
-    /*
-     * Statistics do not require keys actually exist so that applications can query parts of the
-     * object's name space without knowing exactly what records currently appear in the object. For
-     * this reason, do a search-near, rather than a search.
-     */
-    // TODO: revisit if we need to correct after calling search-near, to position the start/stop
-    // cursors on the next record greater than/less than the original key
-    if (start != NULL)
-        if ((ret = start->search_near(start, &cmp)) != 0) {
-            WT_ERR_NOTFOUND_OK(ret, false);
-            *selectivity = 0;
-            goto done;
-        }
-    if (stop != NULL)
-        if ((ret = stop->search_near(stop, &cmp)) != 0) {
-            WT_ERR_NOTFOUND_OK(ret, false);
-            *selectivity = 0;
-            goto done;
-        }
 
     /* If we don't have a start cursor, create one and position it at the first record. */
     if (start == NULL) {
@@ -1402,20 +1362,12 @@ __session_range_cursor(
         WT_ERR(start->next(stop));
     }
 
-    /* If the start/stop keys are equal or cross, we're done, the range must be empty. */
-    WT_ERR(start->compare(start, stop, &cmp));
-    if (cmp >= 0) {
-        *selectivity = 0;
-        goto done;
-    }
-
     if (WT_PREFIX_MATCH(start->internal_uri, "file:")) {
         ret = __wt_btcur_range_selectivity(start, stop, baseCard, selectivity);
     } else {
         WT_ERR_MSG(session, WT_ERROR, "TABLE not supported");
     }
 
-done:
 err:
     /*
      * Reset application cursors, they've possibly moved and the application cannot use them. Close
