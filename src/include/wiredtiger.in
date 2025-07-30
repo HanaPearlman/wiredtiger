@@ -1456,7 +1456,7 @@ struct __wt_session {
 	int __F(range_selectivity)(WT_SESSION *session,
 	    WT_CURSOR *start,
 	    WT_CURSOR *stop,
-	    const char *config, 
+	    const char *config,
         double *selectivityp,
         double *total_key_countp,
         bool *small_rangep);
