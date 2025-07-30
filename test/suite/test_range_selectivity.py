@@ -56,14 +56,16 @@ class test_range_selectivity(wttest.WiredTigerTestCase):
 
         self.session.checkpoint()
 
+        # The point of this test is just a very quick way to make sure range_selectivity doesn't
+        # crash. Due to bad SWIG integration with multiple return arguments, it won't print any
+        # useful output.
+        # You may see "ERROR: Found a leaf without entries." in the output.
         # Search for range [10,000 , 13,000). True card is 3k
         cstart = self.session.open_cursor(uri, None, None)
         cstart.set_key(ds.key(10000))
         cstop = self.session.open_cursor(uri, None, None)
         cstop.set_key(ds.key(13000))
-        sel = self.session.range_selectivity(cstart, cstop)
-        print("Sel for 3k range is: " + str(sel))
-
+        self.session.range_selectivity(cstart, cstop)
 
 
 if __name__ == '__main__':

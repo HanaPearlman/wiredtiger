@@ -1442,26 +1442,24 @@ struct __wt_session {
 	 * The information is an estimate based on assumptions about the distribution of information
      * in the object.
 	 *
-	 * It is not required the cursor reference a record in the object, only that the key be set.
-     * This allows applications to query portions of the object name space without knowing exactly
-     * what records the object contains.
-	 *
 	 * @param session the session handle
 	 * @param start optional cursor marking the first record of the range; if <code>NULL</code>,
 	 * the range starts from the beginning of the object
 	 * @param stop optional cursor marking the last record of the range; if <code>NULL</code>,
 	 * the range continues to the end of the object
      * @configempty{WT_SESSION.range_selectivity, see dist/api_data.py}
-     * @param baseCard the base cardinality
 	 * @param selectivityp the returned selectivity
+     * @param total_key_countp the returned total key count
+     * @param small_rangep whether or not the range falls on a single leaf page or two
 	 * @errors
 	 */
 	int __F(range_selectivity)(WT_SESSION *session,
 	    WT_CURSOR *start,
 	    WT_CURSOR *stop,
 	    const char *config, 
-        double baseCard, 
-        double *selectivityp);
+        double *selectivityp,
+        double *total_key_countp,
+        bool *small_rangep);
 
     /*!
      * Reset the session handle.

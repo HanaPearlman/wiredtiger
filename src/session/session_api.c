@@ -1342,7 +1342,7 @@ err:
  */
 static int
 __session_range_cursor(
-  WT_SESSION_IMPL *session, WT_CURSOR *start, WT_CURSOR *stop, double baseCard, double *selectivity)
+  WT_SESSION_IMPL *session, WT_CURSOR *start, WT_CURSOR *stop, double *selectivityp, double *total_key_countp, bool *small_rangep)
 {
     WT_DECL_RET;
     int cmp;
@@ -1356,36 +1356,35 @@ __session_range_cursor(
      *
      * Rather happily, the compare routine will also confirm the cursors reference the same object
      * and the keys are set.
-     *
-     * The test for a NULL start comparison function isn't necessary (we checked it above), but it
-     * quiets clang static analysis complaints.
      */
     if (start != NULL && stop != NULL && start->compare != NULL) {
         WT_ERR(start->compare(start, stop, &cmp));
         if (cmp > 0) {
-            *selectivity = 0;
-            WT_ERR_MSG(
-              session, EINVAL, "the start cursor position is after the stop cursor position");
+            *selectivityp = 0;
+            *total_key_countp = 0;
+            *small_rangep = true;
+            goto done; // todo?
         }
     }
 
     /*
-     * Statistics do not require keys actually exist so that applications can query parts of the
-     * object's name space without knowing exactly what records currently appear in the object. For
-     * this reason, do a search-near, rather than a search.
+     * Statistics do not require keys actually exist. For this reason, do a search-near, rather than
+     * a search.
      */
-    // TODO: revisit if we need to correct after calling search-near, to position the start/stop
-    // cursors on the next record greater than/less than the original key
     if (start != NULL)
         if ((ret = start->search_near(start, &cmp)) != 0) {
             WT_ERR_NOTFOUND_OK(ret, false);
-            *selectivity = 0;
+            *selectivityp = 0;
+            *total_key_countp = 0;
+            *small_rangep = true;
             goto done;
         }
     if (stop != NULL)
         if ((ret = stop->search_near(stop, &cmp)) != 0) {
             WT_ERR_NOTFOUND_OK(ret, false);
-            *selectivity = 0;
+            *selectivityp = 0;
+            *total_key_countp = 0;
+            *small_rangep = true;
             goto done;
         }
 
@@ -1405,12 +1404,14 @@ __session_range_cursor(
     /* If the start/stop keys are equal or cross, we're done, the range must be empty. */
     WT_ERR(start->compare(start, stop, &cmp));
     if (cmp >= 0) {
-        *selectivity = 0;
+        *selectivityp = 0;
+        *total_key_countp = 0;
+        *small_rangep = true;
         goto done;
     }
 
     if (WT_PREFIX_MATCH(start->internal_uri, "file:")) {
-        ret = __wt_btcur_range_selectivity(start, stop, baseCard, selectivity);
+        ret = __wt_btcur_range_selectivity(start, stop, selectivityp, total_key_countp, small_rangep);
     } else {
         WT_ERR_MSG(session, WT_ERROR, "TABLE not supported");
     }
@@ -1438,7 +1439,7 @@ err:
  */
 static int
 __session_range_selectivity(WT_SESSION *wt_session, WT_CURSOR *start, WT_CURSOR *stop,
-  const char *config, double baseCard, double *selectivity)
+  const char *config, double *selectivityp, double *total_key_countp, bool *small_rangep)
 {
     WT_DECL_RET;
     WT_SESSION_IMPL *session;
@@ -1446,15 +1447,13 @@ __session_range_selectivity(WT_SESSION *wt_session, WT_CURSOR *start, WT_CURSOR 
     (void)start;
     (void)stop;
 
-    *selectivity = 1;
     session = (WT_SESSION_IMPL *)wt_session;
     SESSION_API_CALL(session, ret, range_selectivity, config, cfg);
 
     WT_UNUSED(cfg);
     WT_STAT_CONN_INCR(session, cursor_range_selectivity);
 
-    /* Disallow objects in the WiredTiger name space. */
-    WT_ERR(__session_range_cursor(session, start, stop, baseCard, selectivity));
+    WT_ERR(__session_range_cursor(session, start, stop, selectivityp, total_key_countp, small_rangep));
 
 err:
     if (ret != 0)

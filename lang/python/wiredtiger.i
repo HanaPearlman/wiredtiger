@@ -1051,9 +1051,8 @@ typedef int int_void;
 	}
 
 	/* range_selectivity: special handling. */
-	// TODO: what to do about URI?
-	int _range_selectivity(WT_CURSOR *start, WT_CURSOR *stop, double baseCard, double* selectivity) {
-		int ret = $self->range_selectivity($self, start, stop, NULL, baseCard, selectivity);
+	int _range_selectivity(WT_CURSOR *start, WT_CURSOR *stop, double *selectivityp, double *total_key_countp, bool *small_rangep) {
+		int ret = $self->range_selectivity($self, start, stop, NULL, selectivityp, total_key_countp, small_rangep);
 		return (ret);
 	}
 

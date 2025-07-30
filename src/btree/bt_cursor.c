@@ -2312,7 +2312,7 @@ __cursor_range_selectivity_get_leaf_idx(WT_ITEM *srch_key, WT_SESSION_IMPL *sess
      */
     if (0) {
 leaf_match:
-        // TODO: handle skip list entries?
+        // Note: We are choosing not to consider skip list entries.
         *indx_ptr = WT_ROW_SLOT(page, rip);
         return (0);
     }
@@ -2424,7 +2424,7 @@ err:
  *     Return cursor statistics for a cursor range from the tree.
  */
 static int
-__cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double baseCard, double *selectivityp)
+__cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double *selectivityp, double *total_key_countp, bool *small_rangep)
 {
     WT_DECL_RET;
     WT_ITEM kstart, kstop;
@@ -2440,11 +2440,13 @@ __cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double
     double percentile_start, percentile_stop;
     double selectivity_start_node, selectivity_stop_node;
     bool diverged, adjacent_traversal;
+    double approx_keys;
 
     session = CUR2S(start);
     btree = S2BT(session);
     collator = btree->collator;
 
+    // The following is a useful way to see the full, in-memory tree structure.
     // WT_RET(__wt_debug_tree(session, btree, NULL, "/home/ubuntu/wiredtiger2/build/test.out"));
 
     current_start = current_stop = NULL;
@@ -2454,7 +2456,6 @@ __cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double
     WT_RET(__wt_cursor_get_raw_key((WT_CURSOR *)start, &kstart));
     WT_RET(__wt_cursor_get_raw_key((WT_CURSOR *)stop, &kstop));
 
-    // TODO: could look at  btree->maximum_depth if that's useful to telling how deep to traverse.
     __cursor_pos_clear(start);
     __cursor_pos_clear(stop);
 
@@ -2473,10 +2474,12 @@ restart:
     adjacent_traversal = true;
 
     // Accumulate the percentile for the start and stop keys as we traverse the tree. At the end,
-    // these will be subtracted to get the selectivity of the range. Also, keep track of the
-    // fraction of data under the page we are currently at for both traversals.
+    // these will be subtracted to get the selectivity of the range.
     percentile_start = percentile_stop = 0;
+    // Keep track of the fraction of data under the page we are currently at for both traversals.
     selectivity_start_node = selectivity_stop_node = 1;
+    // Keep track of the estimate for the number of keys in the entire tree.
+    approx_keys = 1;
 
     // Traverse through the tree for both keys simulateneously, starting with a single pointer to
     // the root page. When the start and stop key traversals diverge, then we need two pointers.
@@ -2488,8 +2491,9 @@ restart:
             page_stop = current_stop->page;
         }
 
-        // Leaves are equidistant from the root; if 'start' has hit a leaf, 'stop' has too. TODO:
-        // Edge case: that's not always true.
+        // Leaves are equidistant from the root; if 'start' has hit a leaf, 'stop' has too. Note:
+        // This is not always true. Those should not be too difficult to handle, or we could just
+        // bail out of index CE. This is deferred to future work.
         if (page_start->type != WT_PAGE_ROW_INT)
             break;
 
@@ -2497,6 +2501,7 @@ restart:
         if (diverged) {
             WT_INTL_INDEX_GET(session, page_stop, pindex_stop);
         }
+        
 
         start_child_count = pindex_start->entries;
         if (diverged) {
@@ -2504,6 +2509,10 @@ restart:
         } else {
             stop_child_count = start_child_count;
         }
+
+        // Estimate the fan out at each level as the average of the number of children under
+        // the start and stop pages.
+        approx_keys = approx_keys * ((double)(start_child_count + stop_child_count) / 2);
 
         /* Binary search to find the next page for the start key. */
         ret = __cursor_range_selectivity_do_traversal_step(&kstart, session, collator, start,
@@ -2515,7 +2524,9 @@ restart:
         WT_ERR(ret);
 
         if (diverged) {
-            adjacent_traversal = false; // Could do better, but this is simpler.
+            // Note: we could do better. Even traversals that diverge at the root level can still
+            // end up on adjacent leaves. For now, this is simplest.
+            adjacent_traversal = false;
 
             /* Binary search to find the next page for the stop key. */
             ret = __cursor_range_selectivity_do_traversal_step(&kstop, session, collator, stop,
@@ -2610,10 +2621,11 @@ restart:
     } else {
         stop_child_count = start_child_count;
     }
+    approx_keys = approx_keys * ((double)(start_child_count + stop_child_count) / 2);
 
     if (start_child_count == 0 || stop_child_count == 0) {
         WT_ERR_MSG(
-          session, WT_ERROR, "Found a leaf without entries. Did you forget to checkpoint?");
+          session, WT_ERROR, "Found a leaf without entries.");
     }
 
     ret = __cursor_range_selectivity_get_leaf_idx(
@@ -2639,21 +2651,25 @@ restart:
         // Optimization for when the two traversals end on the same leaf. Rather than relying on
         // assumptions about data distribution, we can directly return the selectivity as the
         // number of keys between the stop and start key over the total number of keys.
-        *selectivityp =  ((double)(indx_stop) - (double)indx_start) / baseCard;
+        *selectivityp = ((double)(indx_stop - indx_start)) / approx_keys;
+        *small_rangep = true;
     } else if (adjacent_traversal) {
         // Optimization for when the two traversals end on adjacent leaves. Similar to the case
         // above, but here the number of keys between the stop and start keys is the sum of:
         // - #keys after the start key on the start key's page (start_child_count - indx_start)
         // - #keys before the stop key on the stop key's page (indx_stop)
-        *selectivityp =  ((double)(indx_stop) + (double)(start_child_count - indx_start)) / baseCard;
-    } else {    
+        *selectivityp = ((double)indx_stop + (start_child_count - indx_start)) / approx_keys;
+        *small_rangep = true;
+    } else {
         // Base case: divergence by at least one leaf.
         // If indx_start is the 0th index, it means the key is before any key found on the page or
         // it is the first key on the page. In that case, we should add nothing to the percentile.
         percentile_start += ((double)(indx_start) / start_child_count) * selectivity_start_node;
         percentile_stop += ((double)(indx_stop) / stop_child_count) * selectivity_stop_node;
         *selectivityp = percentile_stop - percentile_start;
+        *small_rangep = false;
     }
+    *total_key_countp = approx_keys;
 
 err:
     WT_TRET(__wt_page_release(session, current_start, 0));
@@ -2667,7 +2683,7 @@ err:
  *     Return selectivity estimate for a cursor range from the tree.
  */
 int
-__wt_btcur_range_selectivity(WT_CURSOR *start, WT_CURSOR *stop, double baseCard, double *selectivityp)
+__wt_btcur_range_selectivity(WT_CURSOR *start, WT_CURSOR *stop, double *selectivityp, double *total_key_countp, bool *small_rangep)
 {
     WT_CURSOR_BTREE *bt_start, *bt_stop;
     WT_DECL_RET;
@@ -2680,7 +2696,7 @@ __wt_btcur_range_selectivity(WT_CURSOR *start, WT_CURSOR *stop, double baseCard,
 
     WT_WITH_BTREE(session, CUR2BT(bt_start),
       WT_WITH_PAGE_INDEX(
-        session, ret = __cursor_range_selectivity(bt_start, bt_stop, baseCard, selectivityp)));
+        session, ret = __cursor_range_selectivity(bt_start, bt_stop, selectivityp, total_key_countp, small_rangep)));
     return (ret);
 }
 
