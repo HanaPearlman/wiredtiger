@@ -2580,6 +2580,11 @@ restart:
                 if ((ret = __wt_page_in(session, descent_stop, read_flags)) == 0) {
                     current_stop = descent_stop;
                 }
+
+                // This is required so that we have a valid pointer to pass into
+                // __wt_split_descent_race during the next iteration of this loop when searching
+                // for the next stop index.
+                pindex_stop = pindex_start;
             }
             if (ret == WT_RESTART)
                 goto restart;

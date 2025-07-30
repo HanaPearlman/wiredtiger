@@ -1345,48 +1345,9 @@ __session_range_cursor(
   WT_SESSION_IMPL *session, WT_CURSOR *start, WT_CURSOR *stop, double *selectivityp, double *total_key_countp, bool *small_rangep)
 {
     WT_DECL_RET;
-    int cmp;
     bool local_start, local_stop;
 
     local_start = local_stop = false;
-
-    /*
-     * If both cursors set, check they're correctly ordered with respect to each other. We have to
-     * test this before any search, the search can change the initial cursor position.
-     *
-     * Rather happily, the compare routine will also confirm the cursors reference the same object
-     * and the keys are set.
-     */
-    if (start != NULL && stop != NULL && start->compare != NULL) {
-        WT_ERR(start->compare(start, stop, &cmp));
-        if (cmp > 0) {
-            *selectivityp = 0;
-            *total_key_countp = 0;
-            *small_rangep = true;
-            goto done; // todo?
-        }
-    }
-
-    /*
-     * Statistics do not require keys actually exist. For this reason, do a search-near, rather than
-     * a search.
-     */
-    if (start != NULL)
-        if ((ret = start->search_near(start, &cmp)) != 0) {
-            WT_ERR_NOTFOUND_OK(ret, false);
-            *selectivityp = 0;
-            *total_key_countp = 0;
-            *small_rangep = true;
-            goto done;
-        }
-    if (stop != NULL)
-        if ((ret = stop->search_near(stop, &cmp)) != 0) {
-            WT_ERR_NOTFOUND_OK(ret, false);
-            *selectivityp = 0;
-            *total_key_countp = 0;
-            *small_rangep = true;
-            goto done;
-        }
 
     /* If we don't have a start cursor, create one and position it at the first record. */
     if (start == NULL) {
@@ -1401,22 +1362,12 @@ __session_range_cursor(
         WT_ERR(start->next(stop));
     }
 
-    /* If the start/stop keys are equal or cross, we're done, the range must be empty. */
-    WT_ERR(start->compare(start, stop, &cmp));
-    if (cmp >= 0) {
-        *selectivityp = 0;
-        *total_key_countp = 0;
-        *small_rangep = true;
-        goto done;
-    }
-
     if (WT_PREFIX_MATCH(start->internal_uri, "file:")) {
         ret = __wt_btcur_range_selectivity(start, stop, selectivityp, total_key_countp, small_rangep);
     } else {
         WT_ERR_MSG(session, WT_ERROR, "TABLE not supported");
     }
 
-done:
 err:
     /*
      * Reset application cursors, they've possibly moved and the application cannot use them. Close
