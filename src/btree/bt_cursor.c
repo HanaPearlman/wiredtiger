@@ -2420,7 +2420,12 @@ err:
 
 /*
  * __cursor_range_selectivity --
- *     Return cursor statistics for a cursor range from the tree.
+ *     This is the main algorithm for determining the selectivity of a range, represented by 'start'
+ *     and 'stop', within a b-tree. This function produces several outputs: the estimated
+ *     selectivity of the range (i.e., the fraction of the total keys in the b-tree that fall in the
+ *     range) in 'selectivityp', an estimate of the total number of keys in the b-tree in
+ *     'total_key_countp', and a boolean 'small_rangep' that indicates whether the range is so small
+ *     that it fits on only a single leaf page or two.
  */
 static int
 __cursor_range_selectivity(WT_CURSOR_BTREE *start, WT_CURSOR_BTREE *stop, double *selectivityp,
@@ -2468,14 +2473,25 @@ restart:
         WT_RET(__wt_page_release(session, current_stop, 0));
     }
 
+    /*
+     * Overview of the algorithm: We start at the root page and traverse the tree for both the start
+     * and stop keys simultaneously. As we traverse, we keep track of an estimate for the percentile
+     * of each key. This estimate relies on an assumption: that the keys under a single page are
+     * distributed evenly among the children of that page. At the end, the start key and stop key
+     * percentiles will be subtracted to get the selectivity of the range.
+     *
+     * We start the traversals with a single pointer to the root page and use this single pointer
+     * until the traversals diverge. At that time, we acquire the pointers needed to continue
+     * separately to the leaves. This increases the chance that we will see a consistent view of the
+     * tree and avoids encountering writes mid-traversal that can cause negative selectivities.
+     */
     current_start = &btree->root;
     diverged = false;
     pindex_start = pindex_stop = NULL;
     adjacent_traversal = true;
 
     /*
-     * Accumulate the percentile for the start and stop keys as we traverse the tree. At the end,
-     * these will be subtracted to get the selectivity of the range.
+     * Accumulate the percentile for the start and stop keys as we traverse the tree.
      */
     percentile_start = percentile_stop = 0;
     /* Keep track of the fraction of data under the page we are currently at for both traversals. */
@@ -2497,8 +2513,8 @@ restart:
 
         /*
          * Leaves are equidistant from the root; if 'start' has hit a leaf, 'stop' has too. Note:
-         * This is not always true. Those should not be too difficult to handle, or we could just
-         * bail out of index CE. This is deferred to future work.
+         * This is not always true. Those cases should not be too difficult to handle, or we could
+         * just bail out of index CE. This is deferred to future work.
          */
         if (page_start->type != WT_PAGE_ROW_INT)
             break;
@@ -2646,6 +2662,9 @@ restart:
         WT_ERR_MSG(session, WT_ERROR, "Found a leaf without entries.");
     }
 
+    /*
+     * Binary search to find the index of the start and stop keys on the leaf page(s).
+     */
     ret = __cursor_range_selectivity_get_leaf_idx(
       &kstart, session, collator, start, current_start, &indx_start);
     if (ret == WT_RESTART) {
