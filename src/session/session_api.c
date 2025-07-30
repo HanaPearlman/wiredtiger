@@ -1342,7 +1342,7 @@ err:
  */
 static int
 __session_range_cursor(
-  WT_SESSION_IMPL *session, WT_CURSOR *start, WT_CURSOR *stop, double baseCard, double *selectivity)
+  WT_SESSION_IMPL *session, WT_CURSOR *start, WT_CURSOR *stop, double *selectivityp, double *total_key_countp, bool *small_rangep)
 {
     WT_DECL_RET;
     bool local_start, local_stop;
@@ -1363,7 +1363,7 @@ __session_range_cursor(
     }
 
     if (WT_PREFIX_MATCH(start->internal_uri, "file:")) {
-        ret = __wt_btcur_range_selectivity(start, stop, baseCard, selectivity);
+        ret = __wt_btcur_range_selectivity(start, stop, selectivityp, total_key_countp, small_rangep);
     } else {
         WT_ERR_MSG(session, WT_ERROR, "TABLE not supported");
     }
@@ -1390,7 +1390,7 @@ err:
  */
 static int
 __session_range_selectivity(WT_SESSION *wt_session, WT_CURSOR *start, WT_CURSOR *stop,
-  const char *config, double baseCard, double *selectivity)
+  const char *config, double *selectivityp, double *total_key_countp, bool *small_rangep)
 {
     WT_DECL_RET;
     WT_SESSION_IMPL *session;
@@ -1398,15 +1398,13 @@ __session_range_selectivity(WT_SESSION *wt_session, WT_CURSOR *start, WT_CURSOR 
     (void)start;
     (void)stop;
 
-    *selectivity = 1;
     session = (WT_SESSION_IMPL *)wt_session;
     SESSION_API_CALL(session, ret, range_selectivity, config, cfg);
 
     WT_UNUSED(cfg);
     WT_STAT_CONN_INCR(session, cursor_range_selectivity);
 
-    /* Disallow objects in the WiredTiger name space. */
-    WT_ERR(__session_range_cursor(session, start, stop, baseCard, selectivity));
+    WT_ERR(__session_range_cursor(session, start, stop, selectivityp, total_key_countp, small_rangep));
 
 err:
     if (ret != 0)
