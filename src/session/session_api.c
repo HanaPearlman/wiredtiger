@@ -1341,8 +1341,8 @@ err:
  *     Session handling of the range ce method with cursors.
  */
 static int
-__session_range_cursor(
-  WT_SESSION_IMPL *session, WT_CURSOR *start, WT_CURSOR *stop, double *selectivityp, double *total_key_countp, bool *small_rangep)
+__session_range_cursor(WT_SESSION_IMPL *session, WT_CURSOR *start, WT_CURSOR *stop,
+  double *selectivityp, double *total_key_countp, bool *small_rangep)
 {
     WT_DECL_RET;
     bool local_start, local_stop;
@@ -1363,7 +1363,8 @@ __session_range_cursor(
     }
 
     if (WT_PREFIX_MATCH(start->internal_uri, "file:")) {
-        ret = __wt_btcur_range_selectivity(start, stop, selectivityp, total_key_countp, small_rangep);
+        ret =
+          __wt_btcur_range_selectivity(start, stop, selectivityp, total_key_countp, small_rangep);
     } else {
         WT_ERR_MSG(session, WT_ERROR, "TABLE not supported");
     }
@@ -1404,7 +1405,8 @@ __session_range_selectivity(WT_SESSION *wt_session, WT_CURSOR *start, WT_CURSOR 
     WT_UNUSED(cfg);
     WT_STAT_CONN_INCR(session, cursor_range_selectivity);
 
-    WT_ERR(__session_range_cursor(session, start, stop, selectivityp, total_key_countp, small_rangep));
+    WT_ERR(
+      __session_range_cursor(session, start, stop, selectivityp, total_key_countp, small_rangep));
 
 err:
     if (ret != 0)
@@ -2418,28 +2420,29 @@ __open_session(WT_CONNECTION_IMPL *conn, WT_EVENT_HANDLER *event_handler, const 
       stds = {NULL, NULL, __session_close, __session_reconfigure, __wt_session_strerror,
         __session_open_cursor, __session_alter, __session_bind_configuration, __session_create,
         __wti_session_compact, __session_drop, __session_log_flush, __session_log_printf,
-        __session_range_selectivity,
-        __session_reset, __session_salvage, __session_truncate, __session_verify,
-        __session_begin_transaction, __session_commit_transaction, __session_prepare_transaction,
-        __session_rollback_transaction, __session_query_timestamp, __session_timestamp_transaction,
-        __session_timestamp_transaction_uint, __session_checkpoint, __session_reset_snapshot,
-        __session_transaction_pinned_range, __session_get_last_error, __wt_session_breakpoint},
+        __session_range_selectivity, __session_reset, __session_salvage, __session_truncate,
+        __session_verify, __session_begin_transaction, __session_commit_transaction,
+        __session_prepare_transaction, __session_rollback_transaction, __session_query_timestamp,
+        __session_timestamp_transaction, __session_timestamp_transaction_uint, __session_checkpoint,
+        __session_reset_snapshot, __session_transaction_pinned_range, __session_get_last_error,
+        __wt_session_breakpoint},
       stds_min = {NULL, NULL, __session_close, __session_reconfigure_notsup, __wt_session_strerror,
         __session_open_cursor, __session_alter_readonly, __session_bind_configuration,
         __session_create_readonly, __wti_session_compact_readonly, __session_drop_readonly,
-        __session_log_flush_readonly, __session_log_printf_readonly, __session_range_selectivity, __session_reset_notsup,
-        __session_salvage_readonly, __session_truncate_readonly, __session_verify_notsup,
-        __session_begin_transaction_notsup, __session_commit_transaction_notsup,
-        __session_prepare_transaction_readonly, __session_rollback_transaction_notsup,
-        __session_query_timestamp_notsup, __session_timestamp_transaction_notsup,
-        __session_timestamp_transaction_uint_notsup, __session_checkpoint_readonly,
-        __session_reset_snapshot_notsup, __session_transaction_pinned_range_notsup,
-        __session_get_last_error, __wt_session_breakpoint},
+        __session_log_flush_readonly, __session_log_printf_readonly, __session_range_selectivity,
+        __session_reset_notsup, __session_salvage_readonly, __session_truncate_readonly,
+        __session_verify_notsup, __session_begin_transaction_notsup,
+        __session_commit_transaction_notsup, __session_prepare_transaction_readonly,
+        __session_rollback_transaction_notsup, __session_query_timestamp_notsup,
+        __session_timestamp_transaction_notsup, __session_timestamp_transaction_uint_notsup,
+        __session_checkpoint_readonly, __session_reset_snapshot_notsup,
+        __session_transaction_pinned_range_notsup, __session_get_last_error,
+        __wt_session_breakpoint},
       stds_readonly = {NULL, NULL, __session_close, __session_reconfigure, __wt_session_strerror,
         __session_open_cursor, __session_alter_readonly, __session_bind_configuration,
         __session_create_readonly, __wti_session_compact_readonly, __session_drop_readonly,
-        __session_log_flush_readonly, __session_log_printf_readonly, __session_range_selectivity, __session_reset,
-        __session_salvage_readonly, __session_truncate_readonly, __session_verify,
+        __session_log_flush_readonly, __session_log_printf_readonly, __session_range_selectivity,
+        __session_reset, __session_salvage_readonly, __session_truncate_readonly, __session_verify,
         __session_begin_transaction, __session_commit_transaction,
         __session_prepare_transaction_readonly, __session_rollback_transaction,
         __session_query_timestamp, __session_timestamp_transaction,
