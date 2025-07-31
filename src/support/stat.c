@@ -1740,6 +1740,7 @@ static const char *const __stats_connection_desc[] = {
   "cursor: cursor prev calls that skip due to a globally visible history store tombstone",
   "cursor: cursor prev calls that skip greater than or equal to 100 entries",
   "cursor: cursor prev calls that skip less than 100 entries",
+  "cursor: cursor range_selectivity calls",
   "cursor: cursor reconfigure calls that return an error",
   "cursor: cursor remove calls",
   "cursor: cursor remove calls that return an error",
@@ -1978,6 +1979,8 @@ static const char *const __stats_connection_desc[] = {
   "session: table create with import successful calls",
   "session: table drop failed calls",
   "session: table drop successful calls",
+  "session: table range_selectivity failed calls",
+  "session: table range_selectivity successful calls",
   "session: table salvage failed calls",
   "session: table salvage successful calls",
   "session: table truncate failed calls",
@@ -2516,6 +2519,7 @@ __wt_stat_connection_clear_single(WT_CONNECTION_STATS *stats)
     stats->cursor_prev_hs_tombstone = 0;
     stats->cursor_prev_skip_ge_100 = 0;
     stats->cursor_prev_skip_lt_100 = 0;
+    stats->cursor_range_selectivity = 0;
     stats->cursor_reconfigure_error = 0;
     stats->cursor_remove = 0;
     stats->cursor_remove_error = 0;
@@ -2752,6 +2756,8 @@ __wt_stat_connection_clear_single(WT_CONNECTION_STATS *stats)
     /* not clearing session_table_create_import_success */
     /* not clearing session_table_drop_fail */
     /* not clearing session_table_drop_success */
+    /* not clearing session_table_range_selectivity_fail */
+    /* not clearing session_table_range_selectivity_success */
     /* not clearing session_table_salvage_fail */
     /* not clearing session_table_salvage_success */
     /* not clearing session_table_truncate_fail */
@@ -3336,6 +3342,7 @@ __wt_stat_connection_aggregate(WT_CONNECTION_STATS **from, WT_CONNECTION_STATS *
     to->cursor_prev_hs_tombstone += WT_STAT_CONN_READ(from, cursor_prev_hs_tombstone);
     to->cursor_prev_skip_ge_100 += WT_STAT_CONN_READ(from, cursor_prev_skip_ge_100);
     to->cursor_prev_skip_lt_100 += WT_STAT_CONN_READ(from, cursor_prev_skip_lt_100);
+    to->cursor_range_selectivity += WT_STAT_CONN_READ(from, cursor_range_selectivity);
     to->cursor_reconfigure_error += WT_STAT_CONN_READ(from, cursor_reconfigure_error);
     to->cursor_remove += WT_STAT_CONN_READ(from, cursor_remove);
     to->cursor_remove_error += WT_STAT_CONN_READ(from, cursor_remove_error);
@@ -3612,6 +3619,10 @@ __wt_stat_connection_aggregate(WT_CONNECTION_STATS **from, WT_CONNECTION_STATS *
       WT_STAT_CONN_READ(from, session_table_create_import_success);
     to->session_table_drop_fail += WT_STAT_CONN_READ(from, session_table_drop_fail);
     to->session_table_drop_success += WT_STAT_CONN_READ(from, session_table_drop_success);
+    to->session_table_range_selectivity_fail +=
+      WT_STAT_CONN_READ(from, session_table_range_selectivity_fail);
+    to->session_table_range_selectivity_success +=
+      WT_STAT_CONN_READ(from, session_table_range_selectivity_success);
     to->session_table_salvage_fail += WT_STAT_CONN_READ(from, session_table_salvage_fail);
     to->session_table_salvage_success += WT_STAT_CONN_READ(from, session_table_salvage_success);
     to->session_table_truncate_fail += WT_STAT_CONN_READ(from, session_table_truncate_fail);

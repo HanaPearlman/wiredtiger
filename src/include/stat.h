@@ -820,6 +820,7 @@ struct __wt_connection_stats {
     int64_t cursor_prev_hs_tombstone;
     int64_t cursor_prev_skip_ge_100;
     int64_t cursor_prev_skip_lt_100;
+    int64_t cursor_range_selectivity;
     int64_t cursor_reconfigure_error;
     int64_t cursor_remove;
     int64_t cursor_remove_error;
@@ -1056,6 +1057,8 @@ struct __wt_connection_stats {
     int64_t session_table_create_import_success;
     int64_t session_table_drop_fail;
     int64_t session_table_drop_success;
+    int64_t session_table_range_selectivity_fail;
+    int64_t session_table_range_selectivity_success;
     int64_t session_table_salvage_fail;
     int64_t session_table_salvage_success;
     int64_t session_table_truncate_fail;

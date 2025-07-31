@@ -87,6 +87,9 @@ from packing import pack, unpack
 %typemap(in, numinputs=0) bool * (bool temp = false) {
 	$1 = &temp;
  }
+%typemap(in, numinputs=0) double * (double temp = 1) {
+	$1 = &temp;
+ }
 %typemap(in, numinputs=0) wt_off_t * (wt_off_t temp = false) {
 	$1 = &temp;
 }
@@ -233,6 +236,10 @@ from packing import pack, unpack
 
 %typemap(argout) bool * {
 	$result = PyBool_FromLong(*$1);
+}
+
+%typemap(argout) double * {
+	$result = PyFloat_FromDouble(*$1);
 }
 
 %typemap(argout) wt_off_t * {
@@ -1041,6 +1048,12 @@ typedef int int_void;
 %extend __wt_session {
 	int _log_printf(const char *msg) {
 		return self->log_printf(self, "%s", msg);
+	}
+
+	/* range_selectivity: special handling. */
+	int _range_selectivity(WT_CURSOR *start, WT_CURSOR *stop, double *selectivityp, double *total_key_countp, bool *small_rangep) {
+		int ret = $self->range_selectivity($self, start, stop, NULL, selectivityp, total_key_countp, small_rangep);
+		return (ret);
 	}
 
 	int _freecb() {
